@@ -105,7 +105,10 @@ def run_command(args: argparse.Namespace) -> int:
     provider = DataForSEOTrendProvider.from_env(config.defaults) or EmptyTrendProvider()
     analyzer = OpenAIIntentAnalyzer.from_env() or RuleIntentAnalyzer()
     notifiers = [] if args.no_notify else configured_notifiers()
-    rows = db.get_keywords_for_processing(args.limit)
+    rows = db.get_keywords_for_processing(
+        args.limit,
+        min_evidence_score=config.defaults.candidate_min_evidence_score,
+    )
     print(f"[process] provider={provider.name} keywords={len(rows)} notifiers={len(notifiers)}")
 
     pushed = 0
@@ -136,8 +139,10 @@ def run_command(args: argparse.Namespace) -> int:
             was_pushed=db.keyword_was_pushed(keyword),
             push_threshold=config.defaults.push_score_threshold,
             observe_threshold=config.defaults.observe_score_threshold,
+            evidence_score=int(row["evidence_score"] or 0),
         )
         db.save_trend_result(trend, score)
+        db.update_keyword_lifecycle(keyword, trend, score)
 
         if score.status == "push":
             pushed += 1
@@ -148,10 +153,10 @@ def run_command(args: argparse.Namespace) -> int:
                 sent_successfully = sent_successfully or success
             if sent_successfully:
                 db.mark_pushed(keyword)
-            print(f"[push] {index}/{len(rows)} {keyword} score={score.score}")
+            print(f"[push] {index}/{len(rows)} {keyword} score={score.score} evidence={score.evidence_score}")
         elif score.status == "observe":
             observed += 1
-            print(f"[observe] {index}/{len(rows)} {keyword} score={score.score}")
+            print(f"[observe] {index}/{len(rows)} {keyword} score={score.score} evidence={score.evidence_score}")
         else:
             dropped += 1
 
@@ -241,11 +246,21 @@ def trend_row_to_record(row) -> dict[str, str | int]:
     related_rising = json.loads(row["related_rising_json"] or "[]")
     reasons = json.loads(row["reasons_json"] or "[]")
     metrics = compute_trend_metrics(graph_values)
+    opportunity_score = row["opportunity_score"] if "opportunity_score" in row.keys() else row["score"]
+    if not opportunity_score:
+        opportunity_score = row["score"]
     return {
         "keyword": row["keyword"],
         "canonical_keyword": row["canonical_keyword"] if "canonical_keyword" in row.keys() else row["keyword"],
         "score": row["score"],
+        "evidence_score": row["evidence_score"] if "evidence_score" in row.keys() else "",
+        "opportunity_score": opportunity_score,
         "status": row["status"],
+        "lifecycle_status": row["lifecycle_status"] if "lifecycle_status" in row.keys() else "",
+        "cooldown_until": row["cooldown_until"] if "cooldown_until" in row.keys() else "",
+        "review_count": row["review_count"] if "review_count" in row.keys() else "",
+        "drop_count": row["drop_count"] if "drop_count" in row.keys() else "",
+        "lifecycle_reason": row["lifecycle_reason"] if "lifecycle_reason" in row.keys() else "",
         "site_name": row["site_name"] or "",
         "game_url": row["game_url"] or "",
         "variant_count": row["variant_count"] if "variant_count" in row.keys() else "",
@@ -277,7 +292,14 @@ def write_csv(output: Path, records: list[dict[str, str | int]]) -> None:
         "keyword",
         "canonical_keyword",
         "score",
+        "evidence_score",
+        "opportunity_score",
         "status",
+        "lifecycle_status",
+        "cooldown_until",
+        "review_count",
+        "drop_count",
+        "lifecycle_reason",
         "site_name",
         "variant_count",
         "variants",
@@ -310,7 +332,10 @@ def write_markdown(output: Path, records: list[dict[str, str | int]]) -> None:
                 f"## {record['keyword']}",
                 "",
                 f"- Score: {record['score']}",
+                f"- Evidence Score: {record['evidence_score']}",
+                f"- Opportunity Score: {record['opportunity_score']}",
                 f"- Status: {record['status']}",
+                f"- Lifecycle: {record['lifecycle_status']} ({record['lifecycle_reason']})",
                 f"- Site: {record['site_name']}",
                 f"- Peak: {record['peak']}",
                 f"- Recent Avg: {record['recent_avg']}",

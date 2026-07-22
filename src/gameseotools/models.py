@@ -42,3 +42,4 @@ class ScoreResult:
     reasons: list[str]
     intent_summary: str = ""
     is_noise: bool = False
+    evidence_score: int = 0

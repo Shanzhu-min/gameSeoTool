@@ -30,7 +30,7 @@ from .reporting import (
 from .trends import DataForSEOTrendProvider
 
 
-APP_BUILD = "quality-v4-validation-gate"
+APP_BUILD = "quality-v5-lifecycle-report"
 
 
 @dataclass
@@ -277,23 +277,34 @@ def render_dashboard(app: WebApp) -> str:
     db.migrate()
     stats = db.stats()
     counts = db.trend_status_counts()
-    rows = db.trend_results(limit=12)
+    lifecycle = db.lifecycle_counts()
+    recommended = db.trend_results(limit=5, status="push")
+    watching = db.trend_results(limit=8, status="observe")
     tasks = db.recent_task_runs(limit=5)
     db.close()
     cards = [
         ("Game Pages", stats.get("game_pages", 0)),
         ("Keywords", stats.get("keywords", 0)),
         ("Trend Results", stats.get("trend_results", 0)),
-        ("Push", counts.get("push", 0)),
-        ("Observe", counts.get("observe", 0)),
-        ("Drop", counts.get("drop", 0)),
+        ("Recommended", lifecycle.get("recommended", counts.get("push", 0))),
+        ("Watching", lifecycle.get("watching", counts.get("observe", 0))),
+        ("Old / Noise", lifecycle.get("old_game", 0) + lifecycle.get("noise", 0)),
     ]
     card_html = "".join(f'<section class="metric"><span>{label}</span><strong>{value}</strong></section>' for label, value in cards)
     content = f"""
+    <section class="report-hero">
+      <p class="eyebrow">Daily Opportunity Report</p>
+      <h2>Start with the few keywords worth a decision today.</h2>
+      <p>Recommended items scored at or above the report threshold. Watching items are kept for low-frequency follow-up instead of being pushed into the morning report.</p>
+    </section>
     <section class="metrics">{card_html}</section>
     <section class="panel">
-      <div class="panel-title"><h2>Recent Results</h2><a href="/results">View all</a></div>
-      {render_results_table(rows)}
+      <div class="panel-title"><h2>Today Recommendations</h2><a href="/results?status=push">View all</a></div>
+      {render_report_cards(recommended)}
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h2>Watchlist</h2><a href="/results?status=observe">View all</a></div>
+      {render_results_table(watching)}
     </section>
     <section class="panel">
       <div class="panel-title"><h2>Recent Tasks</h2><a href="/tasks">Run task</a></div>
@@ -364,7 +375,9 @@ def render_result_detail(app: WebApp, result_id: int) -> str:
       <span class="badge {e(str(record['status']))}">{e(str(record['status']))}</span>
     </section>
     <section class="metrics">
-      <section class="metric"><span>Score</span><strong>{record['score']}</strong></section>
+      <section class="metric"><span>Opportunity</span><strong>{record['opportunity_score']}</strong></section>
+      <section class="metric"><span>Evidence</span><strong>{record['evidence_score']}</strong></section>
+      <section class="metric"><span>Lifecycle</span><strong>{record['lifecycle_status'] or 'new_candidate'}</strong></section>
       <section class="metric"><span>Validation</span><strong>{record['validation_status']}</strong></section>
       <section class="metric"><span>Recommend</span><strong>{record['recommendation']}</strong></section>
       <section class="metric"><span>First / Last</span><strong>{record['first']} / {record['last']}</strong></section>
@@ -396,6 +409,10 @@ def render_result_detail(app: WebApp, result_id: int) -> str:
       </div>
     </section>
     <section class="panel">
+      <h2>Recommendation Summary</h2>
+      <p>{e(recommendation_sentence(record))}</p>
+      <p class="muted">Lifecycle reason: {e(record['lifecycle_reason'] or 'N/A')}</p>
+      <p class="muted">Cooldown until: {e(record['cooldown_until'] or 'N/A')}</p>
       <h2>Intent</h2>
       <p>{e(str(record['intent_summary']))}</p>
       <h2>Reasons</h2>
@@ -502,22 +519,62 @@ def render_results_table(rows) -> str:
             <tr>
               <td><a href="{detail}">{e(str(record['canonical_keyword']))}</a><span>{e(str(record['variants'] or record['site_name']))}</span></td>
               <td><span class="badge {e(str(record['status']))}">{e(str(record['status']))}</span></td>
-              <td class="num">{record['score']}</td>
+              <td class="num">{record['opportunity_score']}</td>
+              <td class="num">{record['evidence_score']}</td>
+              <td>{e(str(record['lifecycle_status'] or 'new_candidate'))}</td>
               <td>{e(str(record['validation_status']))}</td>
               <td>{sparkline(graph)}</td>
               <td class="num">{record['last']}</td>
               <td class="num">{record['peak']}</td>
-              <td class="num">{record['recent_avg']}</td>
               <td>{e(str(record['related_rising'])[:120])}</td>
             </tr>
             """
         )
     return f"""
     <table>
-      <thead><tr><th>Keyword Group</th><th>Status</th><th>Score</th><th>Validation</th><th>Trend</th><th>Last</th><th>Peak</th><th>Recent Avg</th><th>Rising</th></tr></thead>
+      <thead><tr><th>Keyword Group</th><th>Status</th><th>Opportunity</th><th>Evidence</th><th>Lifecycle</th><th>Validation</th><th>Trend</th><th>Last</th><th>Peak</th><th>Rising</th></tr></thead>
       <tbody>{''.join(body)}</tbody>
     </table>
     """
+
+
+def render_report_cards(rows) -> str:
+    if not rows:
+        return '<div class="empty">No recommended opportunities yet.</div>'
+    cards = []
+    for row in rows:
+        record = trend_row_to_record(row)
+        detail = f"/results/{row['id']}"
+        summary = recommendation_sentence(record)
+        cards.append(
+            f"""
+            <article class="report-card">
+              <div>
+                <p class="eyebrow">{e(record['site_name'])}</p>
+                <h3><a href="{detail}">{e(str(record['canonical_keyword']))}</a></h3>
+                <p>{e(summary)}</p>
+                <p class="muted">Variants: {e(str(record['variants'] or 'N/A'))}</p>
+              </div>
+              <div class="score-stack">
+                <span>Opportunity</span><strong>{record['opportunity_score']}</strong>
+                <small>Evidence {record['evidence_score']}</small>
+              </div>
+            </article>
+            """
+        )
+    return '<div class="report-cards">' + "".join(cards) + "</div>"
+
+
+def recommendation_sentence(record: dict) -> str:
+    validation = str(record.get("validation_status", ""))
+    rising = str(record.get("related_rising", ""))
+    last = record.get("last", "")
+    peak = record.get("peak", "")
+    if validation == "passed":
+        return f"Trend validation passed, with last value {last} and peak {peak}. Review for wiki, codes, guide, or review content."
+    if rising:
+        return "Rising related queries are present. Review whether the demand maps to actionable game SEO content."
+    return "Recommended by combined evidence and trend score. Open the detail page before committing content resources."
 
 
 def render_task_table(tasks, include_output: bool = False) -> str:
@@ -744,6 +801,44 @@ a { color: var(--accent); }
   margin-bottom: 16px;
   overflow-x: auto;
 }
+.report-hero {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 18px;
+  margin-bottom: 16px;
+}
+.report-hero h2 {
+  font-size: 22px;
+  margin-bottom: 6px;
+}
+.report-hero p { max-width: 860px; }
+.report-cards {
+  display: grid;
+  gap: 10px;
+}
+.report-card {
+  display: grid;
+  grid-template-columns: 1fr 120px;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+}
+.report-card h3 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+.score-stack {
+  display: grid;
+  align-content: center;
+  justify-items: end;
+  color: var(--muted);
+}
+.score-stack strong {
+  color: var(--ink);
+  font-size: 28px;
+}
 .panel-title {
   display: flex;
   align-items: center;
@@ -848,6 +943,8 @@ pre {
   main { margin-left: 0; padding: 16px; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .grid-two { grid-template-columns: 1fr; }
+  .report-card { grid-template-columns: 1fr; }
+  .score-stack { justify-items: start; }
 }
 """
 

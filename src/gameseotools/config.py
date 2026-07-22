@@ -25,6 +25,8 @@ class Defaults:
     max_keywords_per_game: int = 4
     push_score_threshold: int = 60
     observe_score_threshold: int = 40
+    candidate_min_evidence_score: int = 35
+    report_score_threshold: int = 60
 
 
 @dataclass(frozen=True)

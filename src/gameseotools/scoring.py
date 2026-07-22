@@ -13,6 +13,7 @@ def score_keyword(
     was_pushed: bool,
     push_threshold: int,
     observe_threshold: int,
+    evidence_score: int = 0,
 ) -> ScoreResult:
     score = 15
     reasons = ["Keyword candidate: +15"]
@@ -90,7 +91,20 @@ def score_keyword(
         score = min(score, observe_threshold)
         reasons.append("Validation gate: weak signal cannot be pushed")
 
-    score = max(0, min(100, score))
+    trend_score = max(0, min(100, score))
+    if evidence_score > 0:
+        score = round((trend_score * 0.65) + (evidence_score * 0.35))
+        reasons.append(f"Blended trend score {trend_score} with evidence score {evidence_score}")
+    else:
+        score = trend_score
+    if metrics.validation_status == "no_trend_data":
+        score = min(score, observe_threshold - 1)
+    elif metrics.validation_status == "old_or_declining":
+        score = min(score, observe_threshold)
+    elif metrics.validation_status == "volume_without_growth":
+        score = min(score, push_threshold - 1)
+    elif metrics.validation_status == "weak_signal":
+        score = min(score, observe_threshold)
 
     if score >= push_threshold:
         status = "push"
@@ -106,4 +120,5 @@ def score_keyword(
         reasons=reasons,
         intent_summary=intent_summary,
         is_noise=is_noise,
+        evidence_score=evidence_score,
     )

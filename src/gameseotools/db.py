@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 from .keywords import canonical_keyword
+from .lifecycle import cooldown_until, evidence_score_for_candidate, lifecycle_after_score
 from .models import GamePage, KeywordCandidate, ScoreResult, TrendResult
 
 
@@ -16,13 +17,15 @@ class DatabaseProtocol(Protocol):
     def migrate(self) -> None: ...
     def upsert_pages(self, pages: Iterable[GamePage]) -> tuple[int, int]: ...
     def upsert_keywords(self, candidates: Iterable[KeywordCandidate]) -> tuple[int, int]: ...
-    def get_keywords_for_processing(self, limit: int): ...
+    def get_keywords_for_processing(self, limit: int, min_evidence_score: int = 0): ...
     def keyword_was_pushed(self, keyword: str) -> bool: ...
     def save_trend_result(self, trend: TrendResult, score: ScoreResult) -> None: ...
+    def update_keyword_lifecycle(self, keyword: str, trend: TrendResult, score: ScoreResult) -> None: ...
     def mark_pushed(self, keyword: str) -> None: ...
     def log_notification(self, keyword: str, channel: str, payload: dict, success: bool, response_text: str = "") -> None: ...
     def stats(self) -> dict[str, int]: ...
     def trend_status_counts(self) -> dict[str, int]: ...
+    def lifecycle_counts(self) -> dict[str, int]: ...
     def recent_trend_results(self, limit: int = 50): ...
     def trend_results(self, limit: int = 100, status: str | None = None, query: str | None = None): ...
     def get_trend_result(self, result_id: int): ...
@@ -79,7 +82,15 @@ class SQLiteDatabase:
                 source TEXT NOT NULL,
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
-                pushed_at TEXT
+                pushed_at TEXT,
+                lifecycle_status TEXT NOT NULL DEFAULT 'new_candidate',
+                evidence_score INTEGER NOT NULL DEFAULT 0,
+                cooldown_until TEXT,
+                review_count INTEGER NOT NULL DEFAULT 0,
+                drop_count INTEGER NOT NULL DEFAULT 0,
+                last_scored_at TEXT,
+                last_recommended_at TEXT,
+                lifecycle_reason TEXT
             );
 
             CREATE TABLE IF NOT EXISTS trend_results (
@@ -96,6 +107,8 @@ class SQLiteDatabase:
                 related_top_json TEXT NOT NULL,
                 related_rising_json TEXT NOT NULL,
                 raw_json TEXT,
+                evidence_score INTEGER NOT NULL DEFAULT 0,
+                opportunity_score INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -133,6 +146,16 @@ class SQLiteDatabase:
         for statement in [
             "ALTER TABLE keywords ADD COLUMN canonical_keyword TEXT",
             "ALTER TABLE trend_results ADD COLUMN canonical_keyword TEXT",
+            "ALTER TABLE keywords ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'new_candidate'",
+            "ALTER TABLE keywords ADD COLUMN evidence_score INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE keywords ADD COLUMN cooldown_until TEXT",
+            "ALTER TABLE keywords ADD COLUMN review_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE keywords ADD COLUMN drop_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE keywords ADD COLUMN last_scored_at TEXT",
+            "ALTER TABLE keywords ADD COLUMN last_recommended_at TEXT",
+            "ALTER TABLE keywords ADD COLUMN lifecycle_reason TEXT",
+            "ALTER TABLE trend_results ADD COLUMN evidence_score INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE trend_results ADD COLUMN opportunity_score INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 self.conn.execute(statement)
@@ -140,6 +163,7 @@ class SQLiteDatabase:
                 pass
         self.conn.execute("UPDATE keywords SET canonical_keyword = keyword WHERE canonical_keyword IS NULL OR canonical_keyword = ''")
         self.conn.execute("UPDATE trend_results SET canonical_keyword = keyword WHERE canonical_keyword IS NULL OR canonical_keyword = ''")
+        self.conn.execute("UPDATE keywords SET lifecycle_status = 'new_candidate' WHERE lifecycle_status IS NULL OR lifecycle_status = ''")
 
     def backfill_canonical_keywords_once(self) -> None:
         cursor = self.conn.execute("SELECT value FROM schema_meta WHERE key = 'canonical_v3'")
@@ -217,8 +241,11 @@ class SQLiteDatabase:
             else:
                 self.conn.execute(
                     """
-                    INSERT INTO keywords (keyword, canonical_keyword, game_url, site_name, source, first_seen_at, last_seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO keywords (
+                        keyword, canonical_keyword, game_url, site_name, source,
+                        first_seen_at, last_seen_at, lifecycle_status
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         candidate.keyword,
@@ -228,14 +255,15 @@ class SQLiteDatabase:
                         candidate.source,
                         now,
                         now,
+                        "new_candidate",
                     ),
                 )
                 inserted += 1
         self.conn.commit()
         return inserted, seen
 
-    def get_keywords_for_processing(self, limit: int) -> list[sqlite3.Row]:
-        return list(
+    def get_keywords_for_processing(self, limit: int, min_evidence_score: int = 0) -> list[dict]:
+        rows = list(
             self.conn.execute(
                 """
                 SELECT canonical_keyword AS keyword,
@@ -244,15 +272,44 @@ class SQLiteDatabase:
                        MIN(site_name) AS site_name,
                        MIN(source) AS source,
                        MIN(first_seen_at) AS first_seen_at,
-                       MAX(pushed_at) AS pushed_at
+                       MAX(last_seen_at) AS last_seen_at,
+                       MAX(pushed_at) AS pushed_at,
+                       MIN(COALESCE(lifecycle_status, 'new_candidate')) AS lifecycle_status,
+                       MAX(evidence_score) AS evidence_score,
+                       MAX(cooldown_until) AS cooldown_until,
+                       MAX(review_count) AS review_count,
+                       MAX(drop_count) AS drop_count,
+                       COUNT(*) AS variant_count,
+                       COUNT(DISTINCT site_name) AS source_count
                 FROM keywords
+                WHERE COALESCE(lifecycle_status, 'new_candidate') NOT IN ('old_game', 'noise', 'archived')
+                  AND (cooldown_until IS NULL OR datetime(cooldown_until) <= datetime('now'))
                 GROUP BY canonical_keyword
                 ORDER BY datetime(MAX(last_seen_at)) DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (max(limit * 5, limit),),
             )
         )
+        ranked: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            evidence_score, reasons = evidence_score_for_candidate(item)
+            item["evidence_score"] = evidence_score
+            item["evidence_reasons"] = "; ".join(reasons)
+            self.conn.execute(
+                """
+                UPDATE keywords
+                SET evidence_score = ?
+                WHERE canonical_keyword = ?
+                """,
+                (evidence_score, item["canonical_keyword"]),
+            )
+            if evidence_score >= min_evidence_score:
+                ranked.append(item)
+        self.conn.commit()
+        ranked.sort(key=lambda item: (item["evidence_score"], item["last_seen_at"]), reverse=True)
+        return ranked[:limit]
 
     def keyword_was_pushed(self, keyword: str) -> bool:
         cursor = self.conn.execute("SELECT pushed_at FROM keywords WHERE keyword = ?", (keyword,))
@@ -264,11 +321,43 @@ class SQLiteDatabase:
             """
             INSERT INTO trend_results (
                 keyword, canonical_keyword, provider, score, status, reasons_json, intent_summary, is_noise,
-                graph_values_json, related_top_json, related_rising_json, raw_json, created_at
+                graph_values_json, related_top_json, related_rising_json, raw_json,
+                evidence_score, opportunity_score, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             trend_result_values(trend, score),
+        )
+        self.conn.commit()
+
+    def update_keyword_lifecycle(self, keyword: str, trend: TrendResult, score: ScoreResult) -> None:
+        lifecycle_status, cooldown_days, reason = lifecycle_after_score(score, trend.graph_values)
+        now = utc_now()
+        recommended_at = now if lifecycle_status == "recommended" else None
+        self.conn.execute(
+            """
+            UPDATE keywords
+            SET lifecycle_status = ?,
+                cooldown_until = ?,
+                last_scored_at = ?,
+                last_recommended_at = COALESCE(?, last_recommended_at),
+                lifecycle_reason = ?,
+                evidence_score = ?,
+                review_count = COALESCE(review_count, 0) + 1,
+                drop_count = COALESCE(drop_count, 0) + CASE WHEN ? = 'drop' THEN 1 ELSE 0 END
+            WHERE canonical_keyword = ? OR keyword = ?
+            """,
+            (
+                lifecycle_status,
+                cooldown_until(cooldown_days),
+                now,
+                recommended_at,
+                reason,
+                score.evidence_score,
+                score.status,
+                trend.canonical_keyword or keyword,
+                keyword,
+            ),
         )
         self.conn.commit()
 
@@ -310,6 +399,16 @@ class SQLiteDatabase:
         )
         return {row["status"]: int(row["count"]) for row in rows}
 
+    def lifecycle_counts(self) -> dict[str, int]:
+        rows = self.conn.execute(
+            """
+            SELECT COALESCE(lifecycle_status, 'new_candidate') AS status, COUNT(*) AS count
+            FROM keywords
+            GROUP BY COALESCE(lifecycle_status, 'new_candidate')
+            """
+        )
+        return {row["status"]: int(row["count"]) for row in rows}
+
     def recent_trend_results(self, limit: int = 50) -> list[sqlite3.Row]:
         return self.trend_results(limit=limit)
 
@@ -335,7 +434,9 @@ class SQLiteDatabase:
                 SELECT tr.id, tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
                        tr.canonical_keyword, tr.intent_summary, tr.is_noise, tr.graph_values_json,
                        tr.related_top_json, tr.related_rising_json, tr.created_at,
-                       k.site_name, k.game_url, k.source,
+                       tr.evidence_score, tr.opportunity_score,
+                       k.site_name, k.game_url, k.source, k.lifecycle_status, k.cooldown_until,
+                       k.review_count, k.drop_count, k.lifecycle_reason, k.first_seen_at, k.last_seen_at,
                        (SELECT COUNT(*) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variant_count,
                        (SELECT GROUP_CONCAT(keyword, '; ') FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variants
                 FROM trend_results tr
@@ -352,9 +453,13 @@ class SQLiteDatabase:
         cursor = self.conn.execute(
             """
             SELECT tr.id, tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
-                   tr.intent_summary, tr.is_noise, tr.graph_values_json,
+                   tr.canonical_keyword, tr.intent_summary, tr.is_noise, tr.graph_values_json,
                    tr.related_top_json, tr.related_rising_json, tr.raw_json, tr.created_at,
-                   k.site_name, k.game_url, k.source
+                   tr.evidence_score, tr.opportunity_score,
+                   k.site_name, k.game_url, k.source, k.lifecycle_status, k.cooldown_until,
+                   k.review_count, k.drop_count, k.lifecycle_reason, k.first_seen_at, k.last_seen_at,
+                   (SELECT COUNT(*) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variant_count,
+                   (SELECT GROUP_CONCAT(keyword, '; ') FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variants
             FROM trend_results tr
             LEFT JOIN keywords k ON k.keyword = tr.keyword
             WHERE tr.id = ?
@@ -465,7 +570,15 @@ class PostgresDatabase:
                     source TEXT NOT NULL,
                     first_seen_at TIMESTAMPTZ NOT NULL,
                     last_seen_at TIMESTAMPTZ NOT NULL,
-                    pushed_at TIMESTAMPTZ
+                    pushed_at TIMESTAMPTZ,
+                    lifecycle_status TEXT NOT NULL DEFAULT 'new_candidate',
+                    evidence_score INTEGER NOT NULL DEFAULT 0,
+                    cooldown_until TIMESTAMPTZ,
+                    review_count INTEGER NOT NULL DEFAULT 0,
+                    drop_count INTEGER NOT NULL DEFAULT 0,
+                    last_scored_at TIMESTAMPTZ,
+                    last_recommended_at TIMESTAMPTZ,
+                    lifecycle_reason TEXT
                 )
                 """
             )
@@ -485,6 +598,8 @@ class PostgresDatabase:
                     related_top_json TEXT NOT NULL,
                     related_rising_json TEXT NOT NULL,
                     raw_json TEXT,
+                    evidence_score INTEGER NOT NULL DEFAULT 0,
+                    opportunity_score INTEGER NOT NULL DEFAULT 0,
                     created_at TIMESTAMPTZ NOT NULL
                 )
                 """
@@ -525,10 +640,23 @@ class PostgresDatabase:
             )
             cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS canonical_keyword TEXT")
             cur.execute("ALTER TABLE trend_results ADD COLUMN IF NOT EXISTS canonical_keyword TEXT")
+            cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'new_candidate'")
+            cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS evidence_score INTEGER NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMPTZ")
+            cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS review_count INTEGER NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS drop_count INTEGER NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS last_scored_at TIMESTAMPTZ")
+            cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS last_recommended_at TIMESTAMPTZ")
+            cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS lifecycle_reason TEXT")
+            cur.execute("ALTER TABLE trend_results ADD COLUMN IF NOT EXISTS evidence_score INTEGER NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE trend_results ADD COLUMN IF NOT EXISTS opportunity_score INTEGER NOT NULL DEFAULT 0")
             cur.execute("UPDATE keywords SET canonical_keyword = keyword WHERE canonical_keyword IS NULL OR canonical_keyword = ''")
             cur.execute("UPDATE trend_results SET canonical_keyword = keyword WHERE canonical_keyword IS NULL OR canonical_keyword = ''")
+            cur.execute("UPDATE keywords SET lifecycle_status = 'new_candidate' WHERE lifecycle_status IS NULL OR lifecycle_status = ''")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_keywords_last_seen_at ON keywords (last_seen_at DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_keywords_canonical_keyword ON keywords (canonical_keyword)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_keywords_lifecycle_status ON keywords (lifecycle_status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_keywords_cooldown_until ON keywords (cooldown_until)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_trend_results_created_at ON trend_results (created_at DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_trend_results_status ON trend_results (status)")
         self.conn.commit()
@@ -604,8 +732,11 @@ class PostgresDatabase:
                 exists = cur.fetchone() is not None
                 cur.execute(
                     """
-                    INSERT INTO keywords (keyword, canonical_keyword, game_url, site_name, source, first_seen_at, last_seen_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO keywords (
+                        keyword, canonical_keyword, game_url, site_name, source,
+                        first_seen_at, last_seen_at, lifecycle_status
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (keyword) DO UPDATE SET
                         canonical_keyword = EXCLUDED.canonical_keyword,
                         last_seen_at = EXCLUDED.last_seen_at
@@ -618,6 +749,7 @@ class PostgresDatabase:
                         candidate.source,
                         now,
                         now,
+                        "new_candidate",
                     ),
                 )
                 if exists:
@@ -627,7 +759,7 @@ class PostgresDatabase:
         self.conn.commit()
         return inserted, seen
 
-    def get_keywords_for_processing(self, limit: int):
+    def get_keywords_for_processing(self, limit: int, min_evidence_score: int = 0):
         with self.conn.cursor() as cur:
             cur.execute(
                 """
@@ -637,15 +769,40 @@ class PostgresDatabase:
                        MIN(site_name) AS site_name,
                        MIN(source) AS source,
                        MIN(first_seen_at) AS first_seen_at,
-                       MAX(pushed_at) AS pushed_at
+                       MAX(last_seen_at) AS last_seen_at,
+                       MAX(pushed_at) AS pushed_at,
+                       MIN(COALESCE(lifecycle_status, 'new_candidate')) AS lifecycle_status,
+                       MAX(evidence_score) AS evidence_score,
+                       MAX(cooldown_until) AS cooldown_until,
+                       MAX(review_count) AS review_count,
+                       MAX(drop_count) AS drop_count,
+                       COUNT(*) AS variant_count,
+                       COUNT(DISTINCT site_name) AS source_count
                 FROM keywords
+                WHERE COALESCE(lifecycle_status, 'new_candidate') NOT IN ('old_game', 'noise', 'archived')
+                  AND (cooldown_until IS NULL OR cooldown_until <= NOW())
                 GROUP BY canonical_keyword
                 ORDER BY MAX(last_seen_at) DESC
                 LIMIT %s
                 """,
-                (limit,),
+                (max(limit * 5, limit),),
             )
-            return cur.fetchall()
+            rows = cur.fetchall()
+            ranked: list[dict] = []
+            for row in rows:
+                item = dict(row)
+                evidence_score, reasons = evidence_score_for_candidate(item)
+                item["evidence_score"] = evidence_score
+                item["evidence_reasons"] = "; ".join(reasons)
+                cur.execute(
+                    "UPDATE keywords SET evidence_score = %s WHERE canonical_keyword = %s",
+                    (evidence_score, item["canonical_keyword"]),
+                )
+                if evidence_score >= min_evidence_score:
+                    ranked.append(item)
+        self.conn.commit()
+        ranked.sort(key=lambda item: (item["evidence_score"], str(item["last_seen_at"])), reverse=True)
+        return ranked[:limit]
 
     def keyword_was_pushed(self, keyword: str) -> bool:
         with self.conn.cursor() as cur:
@@ -659,11 +816,44 @@ class PostgresDatabase:
                 """
                 INSERT INTO trend_results (
                     keyword, canonical_keyword, provider, score, status, reasons_json, intent_summary, is_noise,
-                    graph_values_json, related_top_json, related_rising_json, raw_json, created_at
+                    graph_values_json, related_top_json, related_rising_json, raw_json,
+                    evidence_score, opportunity_score, created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 trend_result_values(trend, score),
+            )
+        self.conn.commit()
+
+    def update_keyword_lifecycle(self, keyword: str, trend: TrendResult, score: ScoreResult) -> None:
+        lifecycle_status, cooldown_days, reason = lifecycle_after_score(score, trend.graph_values)
+        now = utc_now()
+        recommended_at = now if lifecycle_status == "recommended" else None
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE keywords
+                SET lifecycle_status = %s,
+                    cooldown_until = %s,
+                    last_scored_at = %s,
+                    last_recommended_at = COALESCE(%s, last_recommended_at),
+                    lifecycle_reason = %s,
+                    evidence_score = %s,
+                    review_count = COALESCE(review_count, 0) + 1,
+                    drop_count = COALESCE(drop_count, 0) + CASE WHEN %s = 'drop' THEN 1 ELSE 0 END
+                WHERE canonical_keyword = %s OR keyword = %s
+                """,
+                (
+                    lifecycle_status,
+                    cooldown_until(cooldown_days),
+                    now,
+                    recommended_at,
+                    reason,
+                    score.evidence_score,
+                    score.status,
+                    trend.canonical_keyword or keyword,
+                    keyword,
+                ),
             )
         self.conn.commit()
 
@@ -709,6 +899,17 @@ class PostgresDatabase:
             )
             return {row["status"]: int(row["count"]) for row in cur.fetchall()}
 
+    def lifecycle_counts(self) -> dict[str, int]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(lifecycle_status, 'new_candidate') AS status, COUNT(*) AS count
+                FROM keywords
+                GROUP BY COALESCE(lifecycle_status, 'new_candidate')
+                """
+            )
+            return {row["status"]: int(row["count"]) for row in cur.fetchall()}
+
     def recent_trend_results(self, limit: int = 50):
         return self.trend_results(limit=limit)
 
@@ -734,7 +935,9 @@ class PostgresDatabase:
                 SELECT tr.id, tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
                        tr.canonical_keyword, tr.intent_summary, tr.is_noise, tr.graph_values_json,
                        tr.related_top_json, tr.related_rising_json, tr.created_at,
-                       k.site_name, k.game_url, k.source,
+                       tr.evidence_score, tr.opportunity_score,
+                       k.site_name, k.game_url, k.source, k.lifecycle_status, k.cooldown_until,
+                       k.review_count, k.drop_count, k.lifecycle_reason, k.first_seen_at, k.last_seen_at,
                        (SELECT COUNT(*) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variant_count,
                        (SELECT STRING_AGG(keyword, '; ' ORDER BY keyword) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variants
                 FROM trend_results tr
@@ -754,7 +957,9 @@ class PostgresDatabase:
                 SELECT tr.id, tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
                    tr.canonical_keyword, tr.intent_summary, tr.is_noise, tr.graph_values_json,
                    tr.related_top_json, tr.related_rising_json, tr.raw_json, tr.created_at,
-                   k.site_name, k.game_url, k.source,
+                   tr.evidence_score, tr.opportunity_score,
+                   k.site_name, k.game_url, k.source, k.lifecycle_status, k.cooldown_until,
+                   k.review_count, k.drop_count, k.lifecycle_reason, k.first_seen_at, k.last_seen_at,
                    (SELECT COUNT(*) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variant_count,
                    (SELECT STRING_AGG(keyword, '; ' ORDER BY keyword) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variants
                 FROM trend_results tr
@@ -864,6 +1069,8 @@ def trend_result_values(trend: TrendResult, score: ScoreResult) -> tuple:
         json.dumps(trend.related_top, ensure_ascii=False),
         json.dumps(trend.related_rising, ensure_ascii=False),
         json.dumps(trend.raw, ensure_ascii=False) if trend.raw else None,
+        score.evidence_score,
+        score.score,
         utc_now(),
     )
 

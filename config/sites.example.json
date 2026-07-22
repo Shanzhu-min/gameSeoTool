@@ -7,7 +7,9 @@
     "date_range_days": 30,
     "max_keywords_per_game": 4,
     "push_score_threshold": 60,
-    "observe_score_threshold": 40
+    "observe_score_threshold": 40,
+    "candidate_min_evidence_score": 35,
+    "report_score_threshold": 60
   },
   "sites": [
     {
