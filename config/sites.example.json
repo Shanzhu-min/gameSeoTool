@@ -1,0 +1,35 @@
+{
+  "database_path": "data/gameseo.sqlite3",
+  "defaults": {
+    "location_name": "United States",
+    "language_name": "English",
+    "trend_type": "web",
+    "date_range_days": 30,
+    "max_keywords_per_game": 4,
+    "push_score_threshold": 60,
+    "observe_score_threshold": 40
+  },
+  "sites": [
+    {
+      "name": "crazygames",
+      "enabled": true,
+      "sitemap_url": "https://www.crazygames.com/sitemap-index.xml",
+      "url_patterns": ["/game/", "/g/"],
+      "weight": 1.0
+    },
+    {
+      "name": "poki",
+      "enabled": true,
+      "sitemap_url": "https://poki.com/en/sitemaps/games.xml",
+      "url_patterns": ["/en/g/"],
+      "weight": 1.0
+    },
+    {
+      "name": "y8",
+      "enabled": true,
+      "sitemap_url": "https://www.y8.com/sitemaps/y8/en/sitemap.xml.gz",
+      "url_patterns": ["/games/"],
+      "weight": 0.8
+    }
+  ]
+}
