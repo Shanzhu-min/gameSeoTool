@@ -34,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     stats_parser = subparsers.add_parser("stats", help="Show local database stats")
     stats_parser.add_argument("--config", default=None, help="Path to JSON config file")
 
+    db_check_parser = subparsers.add_parser("db-check", help="Check active persistence backend")
+    db_check_parser.add_argument("--config", default=None, help="Path to JSON config file")
+
     check_parser = subparsers.add_parser("dataforseo-check", help="Check DataForSEO API credentials without trend query cost")
     check_parser.add_argument("--config", default=None, help="Path to JSON config file")
 
@@ -48,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_command(args)
     if args.command == "stats":
         return stats_command(args)
+    if args.command == "db-check":
+        return db_check_command(args)
     if args.command == "dataforseo-check":
         return dataforseo_check_command(args)
     if args.command == "export":
@@ -161,6 +166,22 @@ def stats_command(args: argparse.Namespace) -> int:
     for key, value in db.stats().items():
         print(f"{key}: {value}")
     db.close()
+    return 0
+
+
+def db_check_command(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    try:
+        db = Database(config.database_path)
+        db.migrate()
+        backend = db.backend_name() if hasattr(db, "backend_name") else "unknown"
+        print(f"[ok] database backend={backend}")
+        for key, value in db.stats().items():
+            print(f"{key}: {value}")
+        db.close()
+    except Exception as exc:
+        print(f"[error] database check failed: {exc}")
+        return 2
     return 0
 
 

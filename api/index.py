@@ -9,6 +9,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+# Vercel's filesystem is not persistent. Configure SUPABASE_DB_URL in
+# Vercel Environment Variables for durable storage. This fallback only keeps
+# the MVP bootable when no Postgres connection is configured.
 os.environ.setdefault("GAMESEO_DB_PATH", "/tmp/gameseo.sqlite3")
 
 from gameseotools.web import WebApp, make_handler

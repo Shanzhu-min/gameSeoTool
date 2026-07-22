@@ -1,15 +1,50 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from .models import GamePage, KeywordCandidate, ScoreResult, TrendResult
 
 
+class DatabaseProtocol(Protocol):
+    def close(self) -> None: ...
+    def migrate(self) -> None: ...
+    def upsert_pages(self, pages: Iterable[GamePage]) -> tuple[int, int]: ...
+    def upsert_keywords(self, candidates: Iterable[KeywordCandidate]) -> tuple[int, int]: ...
+    def get_keywords_for_processing(self, limit: int): ...
+    def keyword_was_pushed(self, keyword: str) -> bool: ...
+    def save_trend_result(self, trend: TrendResult, score: ScoreResult) -> None: ...
+    def mark_pushed(self, keyword: str) -> None: ...
+    def log_notification(self, keyword: str, channel: str, payload: dict, success: bool, response_text: str = "") -> None: ...
+    def stats(self) -> dict[str, int]: ...
+    def trend_status_counts(self) -> dict[str, int]: ...
+    def recent_trend_results(self, limit: int = 50): ...
+    def trend_results(self, limit: int = 100, status: str | None = None, query: str | None = None): ...
+    def get_trend_result(self, result_id: int): ...
+    def create_task_run(self, task_type: str, params: dict) -> int: ...
+    def finish_task_run(self, task_id: int, status: str, output_text: str) -> None: ...
+    def recent_task_runs(self, limit: int = 20): ...
+
+
 class Database:
+    """Factory wrapper.
+
+    Set SUPABASE_DB_URL, DATABASE_URL, or POSTGRES_URL to use Supabase/Postgres.
+    Without those variables the app keeps using local SQLite for development.
+    """
+
+    def __new__(cls, path: Path) -> DatabaseProtocol:
+        postgres_url = postgres_database_url()
+        if postgres_url:
+            return PostgresDatabase(postgres_url)
+        return SQLiteDatabase(path)
+
+
+class SQLiteDatabase:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,20 +199,7 @@ class Database:
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                trend.keyword,
-                trend.provider,
-                score.score,
-                score.status,
-                json.dumps(score.reasons, ensure_ascii=False),
-                score.intent_summary,
-                1 if score.is_noise else 0,
-                json.dumps(trend.graph_values, ensure_ascii=False),
-                json.dumps(trend.related_top, ensure_ascii=False),
-                json.dumps(trend.related_rising, ensure_ascii=False),
-                json.dumps(trend.raw, ensure_ascii=False) if trend.raw else None,
-                utc_now(),
-            ),
+            trend_result_values(trend, score),
         )
         self.conn.commit()
 
@@ -204,7 +226,7 @@ class Database:
 
     def stats(self) -> dict[str, int]:
         result = {}
-        for table in ["game_pages", "keywords", "trend_results", "notifications", "task_runs"]:
+        for table in TABLES:
             cursor = self.conn.execute(f"SELECT COUNT(*) AS count FROM {table}")
             result[table] = int(cursor.fetchone()["count"])
         return result
@@ -220,21 +242,7 @@ class Database:
         return {row["status"]: int(row["count"]) for row in rows}
 
     def recent_trend_results(self, limit: int = 50) -> list[sqlite3.Row]:
-        return list(
-            self.conn.execute(
-                """
-                SELECT tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
-                       tr.intent_summary, tr.is_noise, tr.graph_values_json,
-                       tr.related_top_json, tr.related_rising_json, tr.created_at,
-                       k.site_name, k.game_url, k.source
-                FROM trend_results tr
-                LEFT JOIN keywords k ON k.keyword = tr.keyword
-                ORDER BY datetime(tr.created_at) DESC, tr.id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
-        )
+        return self.trend_results(limit=limit)
 
     def trend_results(
         self,
@@ -318,6 +326,365 @@ class Database:
                 (limit,),
             )
         )
+
+    def backend_name(self) -> str:
+        return f"sqlite:{self.path}"
+
+
+class PostgresDatabase:
+    def __init__(self, database_url: str):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError(
+                "Postgres persistence requires psycopg. Install dependencies from pyproject.toml."
+            ) from exc
+
+        self.psycopg = psycopg
+        self.database_url = normalize_postgres_url(database_url)
+        self.conn = psycopg.connect(self.database_url, row_factory=dict_row)
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def migrate(self) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS game_pages (
+                    id BIGSERIAL PRIMARY KEY,
+                    site_name TEXT NOT NULL,
+                    url TEXT NOT NULL UNIQUE,
+                    slug TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    lastmod TEXT,
+                    discovered_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS keywords (
+                    id BIGSERIAL PRIMARY KEY,
+                    keyword TEXT NOT NULL UNIQUE,
+                    game_url TEXT NOT NULL,
+                    site_name TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    first_seen_at TIMESTAMPTZ NOT NULL,
+                    last_seen_at TIMESTAMPTZ NOT NULL,
+                    pushed_at TIMESTAMPTZ
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trend_results (
+                    id BIGSERIAL PRIMARY KEY,
+                    keyword TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    reasons_json TEXT NOT NULL,
+                    intent_summary TEXT,
+                    is_noise BOOLEAN NOT NULL DEFAULT FALSE,
+                    graph_values_json TEXT NOT NULL,
+                    related_top_json TEXT NOT NULL,
+                    related_rising_json TEXT NOT NULL,
+                    raw_json TEXT,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id BIGSERIAL PRIMARY KEY,
+                    keyword TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    success BOOLEAN NOT NULL,
+                    response_text TEXT,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_runs (
+                    id BIGSERIAL PRIMARY KEY,
+                    task_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    params_json TEXT NOT NULL,
+                    output_text TEXT,
+                    started_at TIMESTAMPTZ NOT NULL,
+                    finished_at TIMESTAMPTZ
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_keywords_last_seen_at ON keywords (last_seen_at DESC)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_trend_results_created_at ON trend_results (created_at DESC)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_trend_results_status ON trend_results (status)")
+        self.conn.commit()
+
+    def upsert_pages(self, pages: Iterable[GamePage]) -> tuple[int, int]:
+        inserted = 0
+        updated = 0
+        now = utc_now()
+        with self.conn.cursor() as cur:
+            for page in pages:
+                cur.execute("SELECT id FROM game_pages WHERE url = %s", (page.url,))
+                exists = cur.fetchone() is not None
+                cur.execute(
+                    """
+                    INSERT INTO game_pages (site_name, url, slug, title, lastmod, discovered_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (url) DO UPDATE SET
+                        site_name = EXCLUDED.site_name,
+                        slug = EXCLUDED.slug,
+                        title = EXCLUDED.title,
+                        lastmod = EXCLUDED.lastmod,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (page.site_name, page.url, page.slug, page.title, page.lastmod, page.discovered_at.isoformat(), now),
+                )
+                if exists:
+                    updated += 1
+                else:
+                    inserted += 1
+        self.conn.commit()
+        return inserted, updated
+
+    def upsert_keywords(self, candidates: Iterable[KeywordCandidate]) -> tuple[int, int]:
+        inserted = 0
+        seen = 0
+        now = utc_now()
+        with self.conn.cursor() as cur:
+            for candidate in candidates:
+                cur.execute("SELECT id FROM keywords WHERE keyword = %s", (candidate.keyword,))
+                exists = cur.fetchone() is not None
+                cur.execute(
+                    """
+                    INSERT INTO keywords (keyword, game_url, site_name, source, first_seen_at, last_seen_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (keyword) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
+                    """,
+                    (candidate.keyword, candidate.game_url, candidate.site_name, candidate.source, now, now),
+                )
+                if exists:
+                    seen += 1
+                else:
+                    inserted += 1
+        self.conn.commit()
+        return inserted, seen
+
+    def get_keywords_for_processing(self, limit: int):
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT keyword, game_url, site_name, source, first_seen_at, pushed_at
+                FROM keywords
+                ORDER BY last_seen_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return cur.fetchall()
+
+    def keyword_was_pushed(self, keyword: str) -> bool:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pushed_at FROM keywords WHERE keyword = %s", (keyword,))
+            row = cur.fetchone()
+        return bool(row and row["pushed_at"])
+
+    def save_trend_result(self, trend: TrendResult, score: ScoreResult) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO trend_results (
+                    keyword, provider, score, status, reasons_json, intent_summary, is_noise,
+                    graph_values_json, related_top_json, related_rising_json, raw_json, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                trend_result_values(trend, score),
+            )
+        self.conn.commit()
+
+    def mark_pushed(self, keyword: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE keywords SET pushed_at = %s WHERE keyword = %s", (utc_now(), keyword))
+        self.conn.commit()
+
+    def log_notification(
+        self,
+        keyword: str,
+        channel: str,
+        payload: dict,
+        success: bool,
+        response_text: str = "",
+    ) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO notifications (keyword, channel, payload_json, success, response_text, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (keyword, channel, json.dumps(payload, ensure_ascii=False), bool(success), response_text, utc_now()),
+            )
+        self.conn.commit()
+
+    def stats(self) -> dict[str, int]:
+        result = {}
+        with self.conn.cursor() as cur:
+            for table in TABLES:
+                cur.execute(f"SELECT COUNT(*) AS count FROM {table}")
+                result[table] = int(cur.fetchone()["count"])
+        return result
+
+    def trend_status_counts(self) -> dict[str, int]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM trend_results
+                GROUP BY status
+                """
+            )
+            return {row["status"]: int(row["count"]) for row in cur.fetchall()}
+
+    def recent_trend_results(self, limit: int = 50):
+        return self.trend_results(limit=limit)
+
+    def trend_results(
+        self,
+        limit: int = 100,
+        status: str | None = None,
+        query: str | None = None,
+    ):
+        conditions = []
+        params: list[str | int] = []
+        if status:
+            conditions.append("tr.status = %s")
+            params.append(status)
+        if query:
+            conditions.append("tr.keyword ILIKE %s")
+            params.append(f"%{query}%")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT tr.id, tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
+                       tr.intent_summary, tr.is_noise, tr.graph_values_json,
+                       tr.related_top_json, tr.related_rising_json, tr.created_at,
+                       k.site_name, k.game_url, k.source
+                FROM trend_results tr
+                LEFT JOIN keywords k ON k.keyword = tr.keyword
+                {where}
+                ORDER BY tr.created_at DESC, tr.id DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            return cur.fetchall()
+
+    def get_trend_result(self, result_id: int):
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT tr.id, tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
+                       tr.intent_summary, tr.is_noise, tr.graph_values_json,
+                       tr.related_top_json, tr.related_rising_json, tr.raw_json, tr.created_at,
+                       k.site_name, k.game_url, k.source
+                FROM trend_results tr
+                LEFT JOIN keywords k ON k.keyword = tr.keyword
+                WHERE tr.id = %s
+                """,
+                (result_id,),
+            )
+            return cur.fetchone()
+
+    def create_task_run(self, task_type: str, params: dict) -> int:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO task_runs (task_type, status, params_json, started_at)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id
+                """,
+                (task_type, "running", json.dumps(params, ensure_ascii=False), utc_now()),
+            )
+            task_id = int(cur.fetchone()["id"])
+        self.conn.commit()
+        return task_id
+
+    def finish_task_run(self, task_id: int, status: str, output_text: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE task_runs
+                SET status = %s, output_text = %s, finished_at = %s
+                WHERE id = %s
+                """,
+                (status, output_text[-20000:], utc_now(), task_id),
+            )
+        self.conn.commit()
+
+    def recent_task_runs(self, limit: int = 20):
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, task_type, status, params_json, output_text, started_at, finished_at
+                FROM task_runs
+                ORDER BY started_at DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return cur.fetchall()
+
+    def backend_name(self) -> str:
+        return "postgres"
+
+
+TABLES = ["game_pages", "keywords", "trend_results", "notifications", "task_runs"]
+
+
+def postgres_database_url() -> str:
+    return (
+        os.getenv("SUPABASE_DB_URL")
+        or os.getenv("DATABASE_URL")
+        or os.getenv("POSTGRES_URL")
+        or ""
+    )
+
+
+def normalize_postgres_url(url: str) -> str:
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url.removeprefix("postgres://")
+    if "sslmode=" not in url:
+        joiner = "&" if "?" in url else "?"
+        url = f"{url}{joiner}sslmode=require"
+    return url
+
+
+def trend_result_values(trend: TrendResult, score: ScoreResult) -> tuple:
+    return (
+        trend.keyword,
+        trend.provider,
+        score.score,
+        score.status,
+        json.dumps(score.reasons, ensure_ascii=False),
+        score.intent_summary,
+        bool(score.is_noise),
+        json.dumps(trend.graph_values, ensure_ascii=False),
+        json.dumps(trend.related_top, ensure_ascii=False),
+        json.dumps(trend.related_rising, ensure_ascii=False),
+        json.dumps(trend.raw, ensure_ascii=False) if trend.raw else None,
+        utc_now(),
+    )
 
 
 def utc_now() -> str:

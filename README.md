@@ -45,6 +45,35 @@ OPENAI_API_KEY=sk-xxx
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
+### Supabase 持久化
+
+默认情况下，本地开发会写入 SQLite：
+
+```text
+data/gameseo.sqlite3
+```
+
+如果配置了下面任意一个环境变量，程序会自动改为写入 Supabase/Postgres：
+
+```text
+SUPABASE_DB_URL=postgresql://postgres.xxx:password@aws-xxx.pooler.supabase.com:6543/postgres
+```
+
+也兼容：
+
+```text
+DATABASE_URL=
+POSTGRES_URL=
+```
+
+优先级：
+
+```text
+SUPABASE_DB_URL > DATABASE_URL > POSTGRES_URL > SQLite
+```
+
+在 Supabase 后台可以从 **Project Settings → Database → Connection string** 获取连接串。建议使用 pooler/transaction 模式连接串，并把 `[YOUR-PASSWORD]` 替换成数据库密码。
+
 ## 常用命令
 
 只抓取并生成候选词，不调用外部 API：
@@ -126,8 +155,8 @@ vercel.json
 重要限制：
 
 - Vercel 是 serverless 环境，不适合运行本地版里的长驻内存 scheduler。
-- Vercel 文件系统不是长期持久化数据库，SQLite 只适合本地 MVP，不适合线上生产保存趋势结果。
-- 真正线上版本建议接 PostgreSQL/Supabase/Neon，再用 Vercel Cron 或外部定时任务触发采集接口。
+- Vercel 文件系统不是长期持久化数据库，线上请配置 `SUPABASE_DB_URL` 写入 Supabase。
+- 定时任务建议后续用 Vercel Cron 或外部任务触发接口，不依赖内存 scheduler。
 - DataForSEO、OpenAI、飞书/企业微信 webhook 要在 Vercel Project Settings 的 Environment Variables 中配置，不要提交 `.env`。
 
 ## MVP 推荐执行方式
