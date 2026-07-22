@@ -17,7 +17,13 @@ os.environ.setdefault("GAMESEO_DB_PATH", "/tmp/gameseo.sqlite3")
 from gameseotools.web import WebApp, make_handler
 
 
-_GeneratedHandler = make_handler(WebApp("config/sites.example.json"))
+_GeneratedHandler = make_handler(
+    WebApp(
+        "config/sites.example.json",
+        run_startup_migration=False,
+        enable_scheduler_thread=False,
+    )
+)
 
 
 class handler(_GeneratedHandler):

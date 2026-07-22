@@ -31,15 +31,23 @@ class TaskState:
 
 
 class WebApp:
-    def __init__(self, config_path: str | None):
+    def __init__(
+        self,
+        config_path: str | None,
+        run_startup_migration: bool = True,
+        enable_scheduler_thread: bool = True,
+    ):
         self.config_path = config_path
         self.config = load_config(config_path)
         self.state = TaskState(lock=threading.Lock())
-        db = Database(self.config.database_path)
-        db.migrate()
-        db.close()
-        self.scheduler_thread = threading.Thread(target=self.scheduler_loop, daemon=True)
-        self.scheduler_thread.start()
+        self.scheduler_thread = None
+        if run_startup_migration:
+            db = Database(self.config.database_path)
+            db.migrate()
+            db.close()
+        if enable_scheduler_thread:
+            self.scheduler_thread = threading.Thread(target=self.scheduler_loop, daemon=True)
+            self.scheduler_thread.start()
 
     def reload_config(self) -> AppConfig:
         self.config = load_config(self.config_path)
@@ -126,6 +134,8 @@ def make_handler(app: WebApp):
             query = parse_qs(parsed.query)
             if path == "/":
                 self.respond_html(render_dashboard(app))
+            elif path == "/health":
+                self.respond_html(render_health())
             elif path == "/results":
                 self.respond_html(render_results(app, query))
             elif path.startswith("/results/"):
@@ -520,6 +530,10 @@ def format_related(item) -> str:
 
 def render_not_found() -> str:
     return render_layout("Not Found", '<section class="panel"><p>The requested page was not found.</p></section>')
+
+
+def render_health() -> str:
+    return render_layout("Health", '<section class="panel"><p>OK</p></section>')
 
 
 def option(value: str, label: str, selected: str) -> str:
