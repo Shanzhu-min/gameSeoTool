@@ -10,7 +10,11 @@ from .http import fetch
 from .models import GamePage
 
 
-def discover_game_pages(site: SiteConfig, max_sitemaps: int = 20) -> list[GamePage]:
+def discover_game_pages(
+    site: SiteConfig,
+    max_sitemaps: int = 20,
+    max_pages: int | None = None,
+) -> list[GamePage]:
     sitemap_urls = expand_sitemap(site.sitemap_url, max_sitemaps=max_sitemaps)
     pages: list[GamePage] = []
     for sitemap_url in sitemap_urls:
@@ -18,6 +22,8 @@ def discover_game_pages(site: SiteConfig, max_sitemaps: int = 20) -> list[GamePa
         if response.status < 200 or response.status >= 400:
             continue
         pages.extend(parse_urlset(response.text, site))
+        if max_pages and len(pages) >= max_pages:
+            return dedupe_pages(pages)[:max_pages]
     return dedupe_pages(pages)
 
 

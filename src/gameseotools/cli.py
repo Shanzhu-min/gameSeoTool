@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--dry-run", action="store_true", help="Skip external trend, AI, and notification calls")
     run_parser.add_argument("--no-notify", action="store_true", help="Do not send webhook notifications")
     run_parser.add_argument("--max-sitemaps", type=int, default=8, help="Max child sitemaps per sitemap index")
+    run_parser.add_argument("--max-pages-per-site", type=int, default=0, help="Max discovered pages per site, 0 means unlimited")
     run_parser.add_argument("--skip-discovery", action="store_true", help="Skip sitemap discovery and process existing keywords")
     run_parser.add_argument("--request-delay", type=float, default=1.0, help="Seconds to wait between trend requests")
     run_parser.add_argument("--stop-on-error", action="store_true", help="Stop the batch when a keyword request fails")
@@ -70,10 +71,15 @@ def run_command(args: argparse.Namespace) -> int:
     if args.skip_discovery:
         print("[site] skipped sitemap discovery")
     else:
+        max_pages_per_site = getattr(args, "max_pages_per_site", 0)
         for site in config.sites:
             print(f"[site] reading {site.name}: {site.sitemap_url}")
             try:
-                pages = discover_game_pages(site, max_sitemaps=args.max_sitemaps)
+                pages = discover_game_pages(
+                    site,
+                    max_sitemaps=args.max_sitemaps,
+                    max_pages=max_pages_per_site or None,
+                )
             except Exception as exc:
                 print(f"[site-error] {site.name}: {exc}")
                 continue

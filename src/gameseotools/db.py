@@ -28,6 +28,7 @@ class DatabaseProtocol(Protocol):
     def create_task_run(self, task_type: str, params: dict) -> int: ...
     def finish_task_run(self, task_id: int, status: str, output_text: str) -> None: ...
     def recent_task_runs(self, limit: int = 20): ...
+    def mark_stale_task_runs(self, max_age_minutes: int = 30) -> int: ...
 
 
 class Database:
@@ -326,6 +327,25 @@ class SQLiteDatabase:
                 (limit,),
             )
         )
+
+    def mark_stale_task_runs(self, max_age_minutes: int = 30) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE task_runs
+            SET status = 'failed',
+                output_text = COALESCE(output_text, '') || ?,
+                finished_at = ?
+            WHERE status = 'running'
+              AND datetime(started_at) < datetime('now', ?)
+            """,
+            (
+                "\n[stale] Task exceeded the runtime window and was marked failed.",
+                utc_now(),
+                f"-{max_age_minutes} minutes",
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.rowcount)
 
     def backend_name(self) -> str:
         return f"sqlite:{self.path}"
@@ -644,6 +664,27 @@ class PostgresDatabase:
                 (limit,),
             )
             return cur.fetchall()
+
+    def mark_stale_task_runs(self, max_age_minutes: int = 30) -> int:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE task_runs
+                SET status = 'failed',
+                    output_text = COALESCE(output_text, '') || %s,
+                    finished_at = %s
+                WHERE status = 'running'
+                  AND started_at < NOW() - (%s * INTERVAL '1 minute')
+                """,
+                (
+                    "\n[stale] Task exceeded the runtime window and was marked failed.",
+                    utc_now(),
+                    max_age_minutes,
+                ),
+            )
+            count = cur.rowcount
+        self.conn.commit()
+        return int(count)
 
     def backend_name(self) -> str:
         return "postgres"

@@ -6,6 +6,7 @@ import html
 import io
 import json
 import mimetypes
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -70,6 +71,7 @@ class WebApp:
                     "skip_discovery": False,
                     "dry_run": False,
                     "max_sitemaps": 1,
+                    "max_pages_per_site": 10,
                     "request_delay": 2.0,
                     "stop_on_error": False,
                     "source": "scheduler",
@@ -83,6 +85,9 @@ class WebApp:
                 return False
             self.state.running = True
             self.state.last_message = "Task started"
+        if os.getenv("VERCEL"):
+            self.run_task_worker(params)
+            return True
         thread = threading.Thread(target=self.run_task_worker, args=(params,), daemon=True)
         thread.start()
         return True
@@ -100,6 +105,7 @@ class WebApp:
             dry_run=bool(params.get("dry_run", False)),
             no_notify=bool(params.get("no_notify", True)),
             max_sitemaps=int(params.get("max_sitemaps", 1)),
+            max_pages_per_site=int(params.get("max_pages_per_site", 0)),
             skip_discovery=bool(params.get("skip_discovery", True)),
             request_delay=float(params.get("request_delay", 2.0)),
             stop_on_error=bool(params.get("stop_on_error", False)),
@@ -162,6 +168,7 @@ def make_handler(app: WebApp):
                     "skip_discovery": fields.get("skip_discovery", ["off"])[0] == "on",
                     "dry_run": fields.get("dry_run", ["off"])[0] == "on",
                     "max_sitemaps": safe_int(fields.get("max_sitemaps", ["1"])[0], 1),
+                    "max_pages_per_site": safe_int(fields.get("max_pages_per_site", ["10"])[0], 10),
                     "request_delay": safe_float(fields.get("request_delay", ["2"])[0], 2.0),
                     "stop_on_error": fields.get("stop_on_error", ["off"])[0] == "on",
                     "source": "manual",
@@ -371,6 +378,7 @@ def render_tasks(app: WebApp) -> str:
     config = app.reload_config()
     db = Database(config.database_path)
     db.migrate()
+    db.mark_stale_task_runs(max_age_minutes=1 if os.getenv("VERCEL") else 30)
     tasks = db.recent_task_runs(limit=20)
     db.close()
     running = "Running" if app.state.running else "Idle"
@@ -382,6 +390,7 @@ def render_tasks(app: WebApp) -> str:
       <form class="task-form" method="post" action="/tasks/run">
         <label>Limit <input type="number" name="limit" min="1" max="500" value="20"></label>
         <label>Max sitemaps <input type="number" name="max_sitemaps" min="1" max="20" value="1"></label>
+        <label>Max pages/site <input type="number" name="max_pages_per_site" min="0" max="5000" value="10"></label>
         <label>Request delay <input type="number" name="request_delay" min="0" max="30" step="0.5" value="2"></label>
         <label class="check"><input type="checkbox" name="skip_discovery" checked> Skip discovery</label>
         <label class="check"><input type="checkbox" name="no_notify" checked> No notify</label>
