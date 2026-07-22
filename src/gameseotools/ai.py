@@ -45,11 +45,11 @@ class RuleIntentAnalyzer(IntentAnalyzer):
         is_noise = any(hint in terms.split() for hint in NOISE_HINTS)
         is_game = any(hint in terms.split() for hint in GAME_HINTS)
         if is_game and not is_noise:
-            summary = "Rule check: this keyword includes game, platform, or online play intent and is worth SEO monitoring."
+            summary = "规则判断：该关键词包含 game、平台或在线玩法意图，值得进入游戏 SEO 监控。"
         elif is_noise:
-            summary = "Rule check: this keyword looks like non-game noise, such as music, film, news, or celebrity intent."
+            summary = "规则判断：该关键词疑似非游戏噪音，可能偏向音乐、影视、新闻或人物意图。"
         else:
-            summary = "Rule check: no clear game intent was detected, so keep it in low-priority observation."
+            summary = "规则判断：暂未识别到明确游戏意图，建议低优先级观察。"
         return summary, is_game, is_noise
 
 
@@ -73,7 +73,7 @@ class OpenAIIntentAnalyzer(IntentAnalyzer):
             "keyword": keyword,
             "related_top": trend.related_top[:10],
             "related_rising": trend.related_rising[:10],
-            "task": "判断这个关键词是否适合小游戏/在线游戏 SEO 机会监控。返回 JSON：summary, is_game_related, is_noise。",
+            "task": "判断这个关键词是否适合小游戏或在线游戏 SEO 机会监控。返回 JSON：summary, is_game_related, is_noise。",
         }
         payload = {
             "model": self.model,

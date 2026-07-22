@@ -30,7 +30,7 @@ from .reporting import (
 from .trends import DataForSEOTrendProvider
 
 
-APP_BUILD = "quality-v5-lifecycle-report"
+APP_BUILD = "quality-v6-zh-cn-ui"
 
 
 @dataclass
@@ -39,7 +39,7 @@ class TaskState:
     running: bool = False
     scheduler_enabled: bool = False
     schedule_minutes: int = 1440
-    last_message: str = "Idle"
+    last_message: str = "空闲"
 
 
 class WebApp:
@@ -92,10 +92,10 @@ class WebApp:
     def start_task(self, params: dict) -> bool:
         with self.state.lock:
             if self.state.running:
-                self.state.last_message = "A task is already running"
+                self.state.last_message = "已有任务正在运行"
                 return False
             self.state.running = True
-            self.state.last_message = "Task started"
+            self.state.last_message = "任务已开始"
         if os.getenv("VERCEL"):
             self.run_task_worker(params)
             return True
@@ -138,7 +138,7 @@ class WebApp:
         db.close()
         with self.state.lock:
             self.state.running = False
-            self.state.last_message = f"Task {status}"
+        self.state.last_message = f"任务{translate_task_status(status)}"
 
 
 def make_handler(app: WebApp):
@@ -189,7 +189,7 @@ def make_handler(app: WebApp):
             elif parsed.path == "/tasks/schedule":
                 app.state.scheduler_enabled = fields.get("enabled", ["off"])[0] == "on"
                 app.state.schedule_minutes = safe_int(fields.get("schedule_minutes", ["1440"])[0], 1440)
-                app.state.last_message = "Schedule updated"
+                app.state.last_message = "定时配置已更新"
                 self.redirect("/tasks")
             elif parsed.path == "/exports/create":
                 fmt = fields.get("format", ["csv"])[0]
@@ -240,17 +240,17 @@ def make_handler(app: WebApp):
 
 def render_layout(title: str, content: str, active: str = "") -> str:
     nav = [
-        ("/", "Dashboard", "dashboard"),
-        ("/results", "Trend Results", "results"),
-        ("/tasks", "Tasks", "tasks"),
-        ("/settings", "Settings", "settings"),
+        ("/", "每日报告", "dashboard"),
+        ("/results", "趋势结果", "results"),
+        ("/tasks", "任务", "tasks"),
+        ("/settings", "设置", "settings"),
     ]
     nav_html = "".join(
         f'<a class="{ "active" if key == active else "" }" href="{href}">{label}</a>'
         for href, label, key in nav
     )
     return f"""<!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -283,35 +283,35 @@ def render_dashboard(app: WebApp) -> str:
     tasks = db.recent_task_runs(limit=5)
     db.close()
     cards = [
-        ("Game Pages", stats.get("game_pages", 0)),
-        ("Keywords", stats.get("keywords", 0)),
-        ("Trend Results", stats.get("trend_results", 0)),
-        ("Recommended", lifecycle.get("recommended", counts.get("push", 0))),
-        ("Watching", lifecycle.get("watching", counts.get("observe", 0))),
-        ("Old / Noise", lifecycle.get("old_game", 0) + lifecycle.get("noise", 0)),
+        ("游戏页", stats.get("game_pages", 0)),
+        ("关键词", stats.get("keywords", 0)),
+        ("趋势结果", stats.get("trend_results", 0)),
+        ("已推荐", lifecycle.get("recommended", counts.get("push", 0))),
+        ("观察中", lifecycle.get("watching", counts.get("observe", 0))),
+        ("老游戏/噪音", lifecycle.get("old_game", 0) + lifecycle.get("noise", 0)),
     ]
     card_html = "".join(f'<section class="metric"><span>{label}</span><strong>{value}</strong></section>' for label, value in cards)
     content = f"""
     <section class="report-hero">
-      <p class="eyebrow">Daily Opportunity Report</p>
-      <h2>Start with the few keywords worth a decision today.</h2>
-      <p>Recommended items scored at or above the report threshold. Watching items are kept for low-frequency follow-up instead of being pushed into the morning report.</p>
+      <p class="eyebrow">每日机会报告</p>
+      <h2>优先查看今天真正值得判断的少量关键词。</h2>
+      <p>这里展示达到推荐分数线的关键词。观察池中的词会低频跟踪，不会直接进入早报打扰用户。</p>
     </section>
     <section class="metrics">{card_html}</section>
     <section class="panel">
-      <div class="panel-title"><h2>Today Recommendations</h2><a href="/results?status=push">View all</a></div>
+      <div class="panel-title"><h2>今日推荐</h2><a href="/results?status=push">查看全部</a></div>
       {render_report_cards(recommended)}
     </section>
     <section class="panel">
-      <div class="panel-title"><h2>Watchlist</h2><a href="/results?status=observe">View all</a></div>
+      <div class="panel-title"><h2>观察池</h2><a href="/results?status=observe">查看全部</a></div>
       {render_results_table(watching)}
     </section>
     <section class="panel">
-      <div class="panel-title"><h2>Recent Tasks</h2><a href="/tasks">Run task</a></div>
+      <div class="panel-title"><h2>最近任务</h2><a href="/tasks">运行任务</a></div>
       {render_task_table(tasks)}
     </section>
     """
-    return render_layout("Dashboard", content, "dashboard")
+    return render_layout("每日报告", content, "dashboard")
 
 
 def render_results(app: WebApp, query: dict[str, list[str]]) -> str:
@@ -326,30 +326,30 @@ def render_results(app: WebApp, query: dict[str, list[str]]) -> str:
     content = f"""
     <section class="panel">
       <form class="toolbar" method="get" action="/results">
-        <input type="search" name="q" value="{e(q)}" placeholder="Search keyword">
+        <input type="search" name="q" value="{e(q)}" placeholder="搜索关键词">
         <select name="status">
-          {option("", "All status", status)}
+          {option("", "全部状态", status)}
           {option("push", "Push", status)}
           {option("observe", "Observe", status)}
           {option("drop", "Drop", status)}
         </select>
         <input type="number" name="limit" min="10" max="500" value="{limit}">
-        <button type="submit">Filter</button>
+        <button type="submit">筛选</button>
       </form>
       {render_results_table(rows)}
     </section>
     <section class="panel">
-      <div class="panel-title"><h2>Exports</h2></div>
+      <div class="panel-title"><h2>导出</h2></div>
       <form class="toolbar" method="post" action="/exports/create">
         <input type="number" name="limit" min="10" max="1000" value="100">
         <select name="format">{option("csv", "CSV", "csv")}{option("md", "Markdown", "csv")}</select>
-        <button type="submit">Create Export</button>
-        <a class="button-link" href="/download/trend_results.csv">Download CSV</a>
-        <a class="button-link" href="/download/trend_results.md">Download Markdown</a>
+        <button type="submit">生成导出文件</button>
+        <a class="button-link" href="/download/trend_results.csv">下载 CSV</a>
+        <a class="button-link" href="/download/trend_results.md">下载 Markdown</a>
       </form>
     </section>
     """
-    return render_layout("Trend Results", content, "results")
+    return render_layout("趋势结果", content, "results")
 
 
 def render_result_detail(app: WebApp, result_id: int) -> str:
@@ -370,57 +370,57 @@ def render_result_detail(app: WebApp, result_id: int) -> str:
       <div>
         <p class="eyebrow">{e(record['site_name'])}</p>
         <h2>{e(record['canonical_keyword'])}</h2>
-        <p class="muted">Variants: {e(record['variants'] or 'N/A')}</p>
+        <p class="muted">长尾变体：{e(record['variants'] or 'N/A')}</p>
       </div>
       <span class="badge {e(str(record['status']))}">{e(str(record['status']))}</span>
     </section>
     <section class="metrics">
-      <section class="metric"><span>Opportunity</span><strong>{record['opportunity_score']}</strong></section>
-      <section class="metric"><span>Evidence</span><strong>{record['evidence_score']}</strong></section>
-      <section class="metric"><span>Lifecycle</span><strong>{record['lifecycle_status'] or 'new_candidate'}</strong></section>
-      <section class="metric"><span>Validation</span><strong>{record['validation_status']}</strong></section>
-      <section class="metric"><span>Recommend</span><strong>{record['recommendation']}</strong></section>
-      <section class="metric"><span>First / Last</span><strong>{record['first']} / {record['last']}</strong></section>
-      <section class="metric"><span>Peak</span><strong>{record['peak']}</strong></section>
-      <section class="metric"><span>Recent Avg</span><strong>{record['recent_avg']}</strong></section>
+      <section class="metric"><span>机会分</span><strong>{record['opportunity_score']}</strong></section>
+      <section class="metric"><span>证据分</span><strong>{record['evidence_score']}</strong></section>
+      <section class="metric"><span>生命周期</span><strong>{record['lifecycle_status'] or 'new_candidate'}</strong></section>
+      <section class="metric"><span>趋势验证</span><strong>{record['validation_status']}</strong></section>
+      <section class="metric"><span>推荐等级</span><strong>{record['recommendation']}</strong></section>
+      <section class="metric"><span>首值 / 末值</span><strong>{record['first']} / {record['last']}</strong></section>
+      <section class="metric"><span>峰值</span><strong>{record['peak']}</strong></section>
+      <section class="metric"><span>近期均值</span><strong>{record['recent_avg']}</strong></section>
     </section>
     <section class="panel">
-      <div class="panel-title"><h2>Trend Curve</h2></div>
+      <div class="panel-title"><h2>趋势曲线</h2></div>
       {sparkline(graph, large=True)}
     </section>
     <section class="grid-two">
-      <div class="panel"><h2>Rising Queries</h2>{list_items([format_related(item) for item in related_rising])}</div>
-      <div class="panel"><h2>Top Queries</h2>{list_items([str(item) for item in related_top])}</div>
+      <div class="panel"><h2>上升相关查询</h2>{list_items([format_related(item) for item in related_rising])}</div>
+      <div class="panel"><h2>热门相关查询</h2>{list_items([str(item) for item in related_top])}</div>
     </section>
     <section class="grid-two">
       <div class="panel">
-        <h2>Links</h2>
+        <h2>外部链接</h2>
         {list_items([
-          '<a href="' + e(trends_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Google Trends compare</a>',
+          '<a href="' + e(trends_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Google Trends 对比</a>',
           '<a href="' + e(search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Google Search</a>',
-          '<a href="' + e(wiki_search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Wiki Search</a>',
-          '<a href="' + e(youtube_search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">YouTube Search</a>',
-          '<a href="' + e(roblox_search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Roblox Search</a>',
+          '<a href="' + e(wiki_search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Wiki 搜索</a>',
+          '<a href="' + e(youtube_search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">YouTube 搜索</a>',
+          '<a href="' + e(roblox_search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Roblox 搜索</a>',
         ], escape_items=False)}
       </div>
       <div class="panel">
-        <h2>Domain DNS Check</h2>
+        <h2>域名 DNS 检查</h2>
         {list_items([f"{domain}: {status}" for domain, status in domain_candidates(str(record['canonical_keyword']))])}
       </div>
     </section>
     <section class="panel">
-      <h2>Recommendation Summary</h2>
+      <h2>推荐摘要</h2>
       <p>{e(recommendation_sentence(record))}</p>
-      <p class="muted">Lifecycle reason: {e(record['lifecycle_reason'] or 'N/A')}</p>
-      <p class="muted">Cooldown until: {e(record['cooldown_until'] or 'N/A')}</p>
-      <h2>Intent</h2>
+      <p class="muted">生命周期原因：{e(record['lifecycle_reason'] or 'N/A')}</p>
+      <p class="muted">冷却截止：{e(record['cooldown_until'] or 'N/A')}</p>
+      <h2>意图判断</h2>
       <p>{e(str(record['intent_summary']))}</p>
-      <h2>Reasons</h2>
+      <h2>评分原因</h2>
       {list_items([str(item) for item in reasons])}
-      <p><a href="{e(str(record['game_url']))}" target="_blank" rel="noreferrer">Open source game page</a></p>
+      <p><a href="{e(str(record['game_url']))}" target="_blank" rel="noreferrer">打开来源游戏页面</a></p>
     </section>
     """
-    return render_layout("Keyword Detail", content, "results")
+    return render_layout("关键词详情", content, "results")
 
 
 def render_tasks(app: WebApp) -> str:
@@ -430,84 +430,84 @@ def render_tasks(app: WebApp) -> str:
     db.mark_stale_task_runs(max_age_minutes=1 if os.getenv("VERCEL") else 30)
     tasks = db.recent_task_runs(limit=20)
     db.close()
-    running = "Running" if app.state.running else "Idle"
+    running = "运行中" if app.state.running else "空闲"
     checked = "checked" if app.state.scheduler_enabled else ""
     content = f"""
     <section class="panel">
-      <div class="panel-title"><h2>Task Runner</h2><span class="status-dot">{running}</span></div>
+      <div class="panel-title"><h2>任务执行</h2><span class="status-dot">{running}</span></div>
       <p class="muted">{e(app.state.last_message)}</p>
       <form class="task-form" method="post" action="/tasks/run">
-        <label>Limit <input type="number" name="limit" min="1" max="500" value="20"></label>
-        <label>Max sitemaps <input type="number" name="max_sitemaps" min="1" max="20" value="1"></label>
-        <label>Max pages/site <input type="number" name="max_pages_per_site" min="0" max="5000" value="10"></label>
-        <label>Request delay <input type="number" name="request_delay" min="0" max="30" step="0.5" value="2"></label>
-        <label class="check"><input type="checkbox" name="skip_discovery" checked> Skip discovery</label>
-        <label class="check"><input type="checkbox" name="no_notify" checked> No notify</label>
-        <label class="check"><input type="checkbox" name="dry_run"> Dry run</label>
-        <label class="check"><input type="checkbox" name="stop_on_error"> Stop on error</label>
-        <button type="submit">Start Task</button>
+        <label>处理数量 <input type="number" name="limit" min="1" max="500" value="20"></label>
+        <label>最多 sitemap <input type="number" name="max_sitemaps" min="1" max="20" value="1"></label>
+        <label>每站最多页面 <input type="number" name="max_pages_per_site" min="0" max="5000" value="10"></label>
+        <label>请求间隔 <input type="number" name="request_delay" min="0" max="30" step="0.5" value="2"></label>
+        <label class="check"><input type="checkbox" name="skip_discovery" checked> 跳过站点发现</label>
+        <label class="check"><input type="checkbox" name="no_notify" checked> 不发送通知</label>
+        <label class="check"><input type="checkbox" name="dry_run"> 试运行</label>
+        <label class="check"><input type="checkbox" name="stop_on_error"> 出错即停止</label>
+        <button type="submit">开始任务</button>
       </form>
     </section>
     <section class="panel">
-      <div class="panel-title"><h2>Schedule</h2></div>
+      <div class="panel-title"><h2>定时任务</h2></div>
       <form class="toolbar" method="post" action="/tasks/schedule">
-        <label class="check"><input type="checkbox" name="enabled" {checked}> Enabled</label>
+        <label class="check"><input type="checkbox" name="enabled" {checked}> 启用</label>
         <input type="number" name="schedule_minutes" min="10" max="10080" value="{app.state.schedule_minutes}">
-        <button type="submit">Save Schedule</button>
+        <button type="submit">保存定时设置</button>
       </form>
-      <p class="muted">The MVP scheduler runs in this web process. Keep this server running for scheduled jobs.</p>
+      <p class="muted">当前 MVP 的定时任务运行在 Web 服务进程中。需要保持服务运行，定时任务才会执行。</p>
     </section>
     <section class="panel">
-      <div class="panel-title"><h2>Recent Task Runs</h2></div>
+      <div class="panel-title"><h2>最近任务记录</h2></div>
       {render_task_table(tasks, include_output=True)}
     </section>
     """
-    return render_layout("Tasks", content, "tasks")
+    return render_layout("任务", content, "tasks")
 
 
 def render_settings(app: WebApp) -> str:
     config = app.reload_config()
     provider = DataForSEOTrendProvider.from_env(config.defaults)
-    dataforseo_status = "Configured" if provider else "Missing credentials"
+    dataforseo_status = "已配置" if provider else "缺少凭证"
     database_backend = "unknown"
-    database_status = "Not checked"
+    database_status = "未检查"
     try:
         db = Database(config.database_path)
         db.migrate()
         database_backend = db.backend_name() if hasattr(db, "backend_name") else "unknown"
-        database_status = "Connected"
+        database_status = "已连接"
         db.close()
     except Exception as exc:
-        database_status = f"Error: {exc}"
+        database_status = f"错误：{exc}"
     sites = "".join(
         f"<tr><td>{e(site.name)}</td><td>{e(site.sitemap_url)}</td><td>{', '.join(e(p) for p in site.url_patterns)}</td></tr>"
         for site in config.sites
     )
     content = f"""
     <section class="panel">
-      <h2>Runtime</h2>
+      <h2>运行环境</h2>
       <dl class="settings">
-        <dt>Database backend</dt><dd>{e(database_backend)}</dd>
-        <dt>Database status</dt><dd>{e(database_status)}</dd>
-        <dt>Build</dt><dd>{e(APP_BUILD)}</dd>
-        <dt>SQLite fallback</dt><dd>{e(str(config.database_path))}</dd>
+        <dt>数据库后端</dt><dd>{e(database_backend)}</dd>
+        <dt>数据库状态</dt><dd>{e(database_status)}</dd>
+        <dt>构建版本</dt><dd>{e(APP_BUILD)}</dd>
+        <dt>SQLite 备用路径</dt><dd>{e(str(config.database_path))}</dd>
         <dt>DataForSEO</dt><dd>{dataforseo_status}</dd>
-        <dt>Location</dt><dd>{e(config.defaults.location_name)}</dd>
-        <dt>Language</dt><dd>{e(config.defaults.language_name)}</dd>
-        <dt>Date Range</dt><dd>{config.defaults.date_range_days} days</dd>
+        <dt>地区</dt><dd>{e(config.defaults.location_name)}</dd>
+        <dt>语言</dt><dd>{e(config.defaults.language_name)}</dd>
+        <dt>趋势时间范围</dt><dd>{config.defaults.date_range_days} 天</dd>
       </dl>
     </section>
     <section class="panel">
-      <h2>Sites</h2>
-      <table><thead><tr><th>Name</th><th>Sitemap</th><th>Patterns</th></tr></thead><tbody>{sites}</tbody></table>
+      <h2>监控站点</h2>
+      <table><thead><tr><th>名称</th><th>Sitemap</th><th>URL 规则</th></tr></thead><tbody>{sites}</tbody></table>
     </section>
     """
-    return render_layout("Settings", content, "settings")
+    return render_layout("设置", content, "settings")
 
 
 def render_results_table(rows) -> str:
     if not rows:
-        return '<div class="empty">No trend results yet.</div>'
+        return '<div class="empty">暂无趋势结果。</div>'
     body = []
     for row in rows:
         record = trend_row_to_record(row)
@@ -532,7 +532,7 @@ def render_results_table(rows) -> str:
         )
     return f"""
     <table>
-      <thead><tr><th>Keyword Group</th><th>Status</th><th>Opportunity</th><th>Evidence</th><th>Lifecycle</th><th>Validation</th><th>Trend</th><th>Last</th><th>Peak</th><th>Rising</th></tr></thead>
+      <thead><tr><th>关键词组</th><th>状态</th><th>机会分</th><th>证据分</th><th>生命周期</th><th>趋势验证</th><th>趋势</th><th>末值</th><th>峰值</th><th>上升查询</th></tr></thead>
       <tbody>{''.join(body)}</tbody>
     </table>
     """
@@ -540,7 +540,7 @@ def render_results_table(rows) -> str:
 
 def render_report_cards(rows) -> str:
     if not rows:
-        return '<div class="empty">No recommended opportunities yet.</div>'
+        return '<div class="empty">暂无推荐机会。</div>'
     cards = []
     for row in rows:
         record = trend_row_to_record(row)
@@ -553,11 +553,11 @@ def render_report_cards(rows) -> str:
                 <p class="eyebrow">{e(record['site_name'])}</p>
                 <h3><a href="{detail}">{e(str(record['canonical_keyword']))}</a></h3>
                 <p>{e(summary)}</p>
-                <p class="muted">Variants: {e(str(record['variants'] or 'N/A'))}</p>
+                <p class="muted">长尾变体：{e(str(record['variants'] or 'N/A'))}</p>
               </div>
               <div class="score-stack">
-                <span>Opportunity</span><strong>{record['opportunity_score']}</strong>
-                <small>Evidence {record['evidence_score']}</small>
+                <span>机会分</span><strong>{record['opportunity_score']}</strong>
+                <small>证据分 {record['evidence_score']}</small>
               </div>
             </article>
             """
@@ -571,34 +571,34 @@ def recommendation_sentence(record: dict) -> str:
     last = record.get("last", "")
     peak = record.get("peak", "")
     if validation == "passed":
-        return f"Trend validation passed, with last value {last} and peak {peak}. Review for wiki, codes, guide, or review content."
+        return f"趋势验证已通过，末值为 {last}，峰值为 {peak}。建议评估 wiki、codes、guide 或 review 内容机会。"
     if rising:
-        return "Rising related queries are present. Review whether the demand maps to actionable game SEO content."
-    return "Recommended by combined evidence and trend score. Open the detail page before committing content resources."
+        return "已出现上升相关查询。建议判断这些需求是否能落到可执行的游戏 SEO 内容上。"
+    return "该词由证据分和趋势分共同推荐。投入内容资源前，建议先打开详情页复核。"
 
 
 def render_task_table(tasks, include_output: bool = False) -> str:
     if not tasks:
-        return '<div class="empty">No task runs yet.</div>'
+        return '<div class="empty">暂无任务记录。</div>'
     rows = []
     for task in tasks:
         params = json.loads(task["params_json"] or "{}")
         output = ""
         if include_output and task["output_text"]:
-            output = f'<details><summary>Output</summary><pre>{e(task["output_text"])}</pre></details>'
+            output = f'<details><summary>输出日志</summary><pre>{e(task["output_text"])}</pre></details>'
         rows.append(
             f"""
             <tr>
               <td>{task['id']}</td>
               <td>{e(task['task_type'])}</td>
-              <td><span class="badge {e(task['status'])}">{e(task['status'])}</span></td>
+              <td><span class="badge {e(task['status'])}">{e(translate_task_status(task['status']))}</span></td>
               <td>{e(json.dumps(params, ensure_ascii=False))}{output}</td>
               <td>{e(task['started_at'])}</td>
               <td>{e(task['finished_at'] or '')}</td>
             </tr>
             """
         )
-    return f"<table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Params</th><th>Started</th><th>Finished</th></tr></thead><tbody>{''.join(rows)}</tbody></table>"
+    return f"<table><thead><tr><th>ID</th><th>任务</th><th>状态</th><th>参数</th><th>开始时间</th><th>结束时间</th></tr></thead><tbody>{''.join(rows)}</tbody></table>"
 
 
 def create_export(app: WebApp, fmt: str, limit: int) -> None:
@@ -633,7 +633,7 @@ def sparkline(values: list[int], large: bool = False) -> str:
 
 def list_items(items: list[str], escape_items: bool = True) -> str:
     if not items:
-        return '<div class="empty">No data</div>'
+        return '<div class="empty">暂无数据</div>'
     if escape_items:
         return "<ul>" + "".join(f"<li>{e(item)}</li>" for item in items) + "</ul>"
     return "<ul>" + "".join(f"<li>{item}</li>" for item in items) + "</ul>"
@@ -646,12 +646,12 @@ def format_related(item) -> str:
 
 
 def render_not_found() -> str:
-    return render_layout("Not Found", '<section class="panel"><p>The requested page was not found.</p></section>')
+    return render_layout("未找到页面", '<section class="panel"><p>请求的页面不存在。</p></section>')
 
 
 def render_health() -> str:
-    content = f'<section class="panel"><p>OK</p><p class="muted">Build: {e(APP_BUILD)}</p></section>'
-    return render_layout("Health", content)
+    content = f'<section class="panel"><p>OK</p><p class="muted">构建版本：{e(APP_BUILD)}</p></section>'
+    return render_layout("健康检查", content)
 
 
 def render_db_check(app: WebApp) -> str:
@@ -665,26 +665,34 @@ def render_db_check(app: WebApp) -> str:
         rows = "".join(f"<tr><td>{e(key)}</td><td>{value}</td></tr>" for key, value in stats.items())
         content = f"""
         <section class="panel">
-          <h2>Database Check</h2>
-          <p><strong>Status:</strong> Connected</p>
-          <p><strong>Backend:</strong> {e(backend)}</p>
+          <h2>数据库检查</h2>
+          <p><strong>状态：</strong>已连接</p>
+          <p><strong>后端：</strong>{e(backend)}</p>
           <table><tbody>{rows}</tbody></table>
         </section>
         """
     except Exception as exc:
         content = f"""
         <section class="panel">
-          <h2>Database Check</h2>
-          <p><strong>Status:</strong> Error</p>
+          <h2>数据库检查</h2>
+          <p><strong>状态：</strong>错误</p>
           <pre>{e(exc)}</pre>
         </section>
         """
-    return render_layout("Database Check", content, "settings")
+    return render_layout("数据库检查", content, "settings")
 
 
 def option(value: str, label: str, selected: str) -> str:
     marker = "selected" if value == selected else ""
     return f'<option value="{e(value)}" {marker}>{e(label)}</option>'
+
+
+def translate_task_status(status: str) -> str:
+    return {
+        "success": "成功",
+        "failed": "失败",
+        "running": "运行中",
+    }.get(status, status)
 
 
 def e(value: object) -> str:

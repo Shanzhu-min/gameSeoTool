@@ -18,14 +18,14 @@ class LifecycleTests(unittest.TestCase):
         }
         score, reasons = evidence_score_for_candidate(row)
         self.assertGreaterEqual(score, 45)
-        self.assertTrue(any("First seen" in reason for reason in reasons))
+        self.assertTrue(any("首次发现" in reason for reason in reasons))
 
     def test_inactive_lifecycle_is_excluded(self):
         score, reasons = evidence_score_for_candidate(
             {"keyword": "connect 4", "lifecycle_status": "old_game"}
         )
         self.assertEqual(score, 0)
-        self.assertIn("excluded", reasons[0])
+        self.assertIn("排除", reasons[0])
 
     def test_old_or_declining_sets_old_game(self):
         score = ScoreResult(

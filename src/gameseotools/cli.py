@@ -325,25 +325,25 @@ def write_csv(output: Path, records: list[dict[str, str | int]]) -> None:
 
 
 def write_markdown(output: Path, records: list[dict[str, str | int]]) -> None:
-    lines = ["# Trend Results Review", ""]
+    lines = ["# 趋势结果复核报告", ""]
     for record in records:
         lines.extend(
             [
                 f"## {record['keyword']}",
                 "",
-                f"- Score: {record['score']}",
-                f"- Evidence Score: {record['evidence_score']}",
-                f"- Opportunity Score: {record['opportunity_score']}",
-                f"- Status: {record['status']}",
-                f"- Lifecycle: {record['lifecycle_status']} ({record['lifecycle_reason']})",
-                f"- Site: {record['site_name']}",
-                f"- Peak: {record['peak']}",
-                f"- Recent Avg: {record['recent_avg']}",
-                f"- Rising: {record['related_rising'] or 'N/A'}",
-                f"- Top: {record['related_top'] or 'N/A'}",
-                f"- Intent: {record['intent_summary']}",
-                f"- Reasons: {record['reasons']}",
-                f"- URL: {record['game_url']}",
+                f"- 原始分：{record['score']}",
+                f"- 证据分：{record['evidence_score']}",
+                f"- 机会分：{record['opportunity_score']}",
+                f"- 状态：{record['status']}",
+                f"- 生命周期：{record['lifecycle_status']}（{record['lifecycle_reason']}）",
+                f"- 来源站点：{record['site_name']}",
+                f"- 峰值：{record['peak']}",
+                f"- 近期均值：{record['recent_avg']}",
+                f"- 上升相关查询：{record['related_rising'] or 'N/A'}",
+                f"- 热门相关查询：{record['related_top'] or 'N/A'}",
+                f"- 意图判断：{record['intent_summary']}",
+                f"- 评分原因：{record['reasons']}",
+                f"- 来源 URL：{record['game_url']}",
                 "",
             ]
         )
