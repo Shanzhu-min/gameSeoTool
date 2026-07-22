@@ -30,7 +30,7 @@ from .reporting import (
 from .trends import DataForSEOTrendProvider
 
 
-APP_BUILD = "quality-v3-canonical-reindex"
+APP_BUILD = "quality-v4-validation-gate"
 
 
 @dataclass
