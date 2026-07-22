@@ -136,6 +136,8 @@ def make_handler(app: WebApp):
                 self.respond_html(render_dashboard(app))
             elif path == "/health":
                 self.respond_html(render_health())
+            elif path == "/db-check":
+                self.respond_html(render_db_check(app))
             elif path == "/results":
                 self.respond_html(render_results(app, query))
             elif path.startswith("/results/"):
@@ -409,6 +411,16 @@ def render_settings(app: WebApp) -> str:
     config = app.reload_config()
     provider = DataForSEOTrendProvider.from_env(config.defaults)
     dataforseo_status = "Configured" if provider else "Missing credentials"
+    database_backend = "unknown"
+    database_status = "Not checked"
+    try:
+        db = Database(config.database_path)
+        db.migrate()
+        database_backend = db.backend_name() if hasattr(db, "backend_name") else "unknown"
+        database_status = "Connected"
+        db.close()
+    except Exception as exc:
+        database_status = f"Error: {exc}"
     sites = "".join(
         f"<tr><td>{e(site.name)}</td><td>{e(site.sitemap_url)}</td><td>{', '.join(e(p) for p in site.url_patterns)}</td></tr>"
         for site in config.sites
@@ -417,7 +429,9 @@ def render_settings(app: WebApp) -> str:
     <section class="panel">
       <h2>Runtime</h2>
       <dl class="settings">
-        <dt>Database</dt><dd>{e(str(config.database_path))}</dd>
+        <dt>Database backend</dt><dd>{e(database_backend)}</dd>
+        <dt>Database status</dt><dd>{e(database_status)}</dd>
+        <dt>SQLite fallback</dt><dd>{e(str(config.database_path))}</dd>
         <dt>DataForSEO</dt><dd>{dataforseo_status}</dd>
         <dt>Location</dt><dd>{e(config.defaults.location_name)}</dd>
         <dt>Language</dt><dd>{e(config.defaults.language_name)}</dd>
@@ -534,6 +548,34 @@ def render_not_found() -> str:
 
 def render_health() -> str:
     return render_layout("Health", '<section class="panel"><p>OK</p></section>')
+
+
+def render_db_check(app: WebApp) -> str:
+    config = app.reload_config()
+    try:
+        db = Database(config.database_path)
+        db.migrate()
+        backend = db.backend_name() if hasattr(db, "backend_name") else "unknown"
+        stats = db.stats()
+        db.close()
+        rows = "".join(f"<tr><td>{e(key)}</td><td>{value}</td></tr>" for key, value in stats.items())
+        content = f"""
+        <section class="panel">
+          <h2>Database Check</h2>
+          <p><strong>Status:</strong> Connected</p>
+          <p><strong>Backend:</strong> {e(backend)}</p>
+          <table><tbody>{rows}</tbody></table>
+        </section>
+        """
+    except Exception as exc:
+        content = f"""
+        <section class="panel">
+          <h2>Database Check</h2>
+          <p><strong>Status:</strong> Error</p>
+          <pre>{e(exc)}</pre>
+        </section>
+        """
+    return render_layout("Database Check", content, "settings")
 
 
 def option(value: str, label: str, selected: str) -> str:
