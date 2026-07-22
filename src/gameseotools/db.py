@@ -142,7 +142,7 @@ class SQLiteDatabase:
         self.conn.execute("UPDATE trend_results SET canonical_keyword = keyword WHERE canonical_keyword IS NULL OR canonical_keyword = ''")
 
     def backfill_canonical_keywords_once(self) -> None:
-        cursor = self.conn.execute("SELECT value FROM schema_meta WHERE key = 'canonical_v2'")
+        cursor = self.conn.execute("SELECT value FROM schema_meta WHERE key = 'canonical_v3'")
         row = cursor.fetchone()
         if row and row["value"] == "done":
             return
@@ -169,7 +169,7 @@ class SQLiteDatabase:
             """
         )
         self.conn.execute(
-            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('canonical_v2', 'done')"
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('canonical_v3', 'done')"
         )
 
     def upsert_pages(self, pages: Iterable[GamePage]) -> tuple[int, int]:
@@ -319,7 +319,7 @@ class SQLiteDatabase:
         status: str | None = None,
         query: str | None = None,
     ) -> list[sqlite3.Row]:
-        conditions = ["tr.id IN (SELECT MAX(id) FROM trend_results GROUP BY canonical_keyword)"]
+        conditions = ["tr.id IN (SELECT MAX(id) FROM trend_results GROUP BY COALESCE(NULLIF(canonical_keyword, ''), keyword))"]
         params: list[str | int] = []
         if status:
             conditions.append("tr.status = ?")
@@ -564,7 +564,7 @@ class PostgresDatabase:
 
     def backfill_canonical_keywords_once(self) -> None:
         with self.conn.cursor() as cur:
-            cur.execute("SELECT value FROM schema_meta WHERE key = %s", ("canonical_v2",))
+            cur.execute("SELECT value FROM schema_meta WHERE key = %s", ("canonical_v3",))
             row = cur.fetchone()
             if row and row["value"] == "done":
                 return
@@ -590,7 +590,7 @@ class PostgresDatabase:
                 VALUES (%s, %s)
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
                 """,
-                ("canonical_v2", "done"),
+                ("canonical_v3", "done"),
             )
         self.conn.commit()
 
@@ -718,7 +718,7 @@ class PostgresDatabase:
         status: str | None = None,
         query: str | None = None,
     ):
-        conditions = ["tr.id IN (SELECT MAX(id) FROM trend_results GROUP BY canonical_keyword)"]
+        conditions = ["tr.id IN (SELECT MAX(id) FROM trend_results GROUP BY COALESCE(NULLIF(canonical_keyword, ''), keyword))"]
         params: list[str | int] = []
         if status:
             conditions.append("tr.status = %s")

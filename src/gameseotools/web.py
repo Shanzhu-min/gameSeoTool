@@ -30,6 +30,9 @@ from .reporting import (
 from .trends import DataForSEOTrendProvider
 
 
+APP_BUILD = "quality-v3-canonical-reindex"
+
+
 @dataclass
 class TaskState:
     lock: threading.Lock
@@ -257,6 +260,7 @@ def render_layout(title: str, content: str, active: str = "") -> str:
 <body>
   <aside>
     <div class="brand">Game SEO Tools</div>
+    <div class="build">{e(APP_BUILD)}</div>
     <nav>{nav_html}</nav>
   </aside>
   <main>
@@ -468,6 +472,7 @@ def render_settings(app: WebApp) -> str:
       <dl class="settings">
         <dt>Database backend</dt><dd>{e(database_backend)}</dd>
         <dt>Database status</dt><dd>{e(database_status)}</dd>
+        <dt>Build</dt><dd>{e(APP_BUILD)}</dd>
         <dt>SQLite fallback</dt><dd>{e(str(config.database_path))}</dd>
         <dt>DataForSEO</dt><dd>{dataforseo_status}</dd>
         <dt>Location</dt><dd>{e(config.defaults.location_name)}</dd>
@@ -588,7 +593,8 @@ def render_not_found() -> str:
 
 
 def render_health() -> str:
-    return render_layout("Health", '<section class="panel"><p>OK</p></section>')
+    content = f'<section class="panel"><p>OK</p><p class="muted">Build: {e(APP_BUILD)}</p></section>'
+    return render_layout("Health", content)
 
 
 def render_db_check(app: WebApp) -> str:
@@ -690,7 +696,13 @@ aside {
 .brand {
   font-size: 18px;
   font-weight: 700;
-  margin-bottom: 24px;
+  margin-bottom: 6px;
+}
+.build {
+  color: #8ea0b5;
+  font-size: 11px;
+  margin-bottom: 20px;
+  overflow-wrap: anywhere;
 }
 nav { display: grid; gap: 6px; }
 nav a {
