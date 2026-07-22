@@ -8,6 +8,7 @@ class ScoringTests(unittest.TestCase):
     def test_score_pushes_game_keyword_with_rising_query(self):
         trend = TrendResult(
             keyword="test game",
+            canonical_keyword="test",
             provider="test",
             graph_values=[1, 2, 2, 5, 8, 30, 55],
             related_rising=[("test game unblocked", "500")],

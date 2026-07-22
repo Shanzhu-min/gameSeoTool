@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Protocol
 
+from .keywords import canonical_keyword
 from .models import GamePage, KeywordCandidate, ScoreResult, TrendResult
 
 
@@ -72,6 +73,7 @@ class SQLiteDatabase:
             CREATE TABLE IF NOT EXISTS keywords (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 keyword TEXT NOT NULL UNIQUE,
+                canonical_keyword TEXT,
                 game_url TEXT NOT NULL,
                 site_name TEXT NOT NULL,
                 source TEXT NOT NULL,
@@ -83,6 +85,7 @@ class SQLiteDatabase:
             CREATE TABLE IF NOT EXISTS trend_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 keyword TEXT NOT NULL,
+                canonical_keyword TEXT,
                 provider TEXT NOT NULL,
                 score INTEGER NOT NULL,
                 status TEXT NOT NULL,
@@ -115,9 +118,59 @@ class SQLiteDatabase:
                 started_at TEXT NOT NULL,
                 finished_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
+        self.ensure_columns()
+        self.backfill_canonical_keywords_once()
         self.conn.commit()
+
+    def ensure_columns(self) -> None:
+        for statement in [
+            "ALTER TABLE keywords ADD COLUMN canonical_keyword TEXT",
+            "ALTER TABLE trend_results ADD COLUMN canonical_keyword TEXT",
+        ]:
+            try:
+                self.conn.execute(statement)
+            except sqlite3.OperationalError:
+                pass
+        self.conn.execute("UPDATE keywords SET canonical_keyword = keyword WHERE canonical_keyword IS NULL OR canonical_keyword = ''")
+        self.conn.execute("UPDATE trend_results SET canonical_keyword = keyword WHERE canonical_keyword IS NULL OR canonical_keyword = ''")
+
+    def backfill_canonical_keywords_once(self) -> None:
+        cursor = self.conn.execute("SELECT value FROM schema_meta WHERE key = 'canonical_v2'")
+        row = cursor.fetchone()
+        if row and row["value"] == "done":
+            return
+        rows = self.conn.execute("SELECT keyword, site_name FROM keywords").fetchall()
+        for row in rows:
+            canonical = canonical_keyword(row["keyword"], site_name=row["site_name"])
+            self.conn.execute(
+                "UPDATE keywords SET canonical_keyword = ? WHERE keyword = ?",
+                (canonical, row["keyword"]),
+            )
+        self.conn.execute(
+            """
+            UPDATE trend_results
+            SET canonical_keyword = (
+                SELECT canonical_keyword
+                FROM keywords
+                WHERE keywords.keyword = trend_results.keyword
+            )
+            WHERE EXISTS (
+                SELECT 1
+                FROM keywords
+                WHERE keywords.keyword = trend_results.keyword
+            )
+            """
+        )
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('canonical_v2', 'done')"
+        )
 
     def upsert_pages(self, pages: Iterable[GamePage]) -> tuple[int, int]:
         inserted = 0
@@ -157,17 +210,25 @@ class SQLiteDatabase:
             exists = cursor.fetchone() is not None
             if exists:
                 self.conn.execute(
-                    "UPDATE keywords SET last_seen_at = ? WHERE keyword = ?",
-                    (now, candidate.keyword),
+                    "UPDATE keywords SET canonical_keyword = ?, last_seen_at = ? WHERE keyword = ?",
+                    (candidate.canonical_keyword, now, candidate.keyword),
                 )
                 seen += 1
             else:
                 self.conn.execute(
                     """
-                    INSERT INTO keywords (keyword, game_url, site_name, source, first_seen_at, last_seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO keywords (keyword, canonical_keyword, game_url, site_name, source, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (candidate.keyword, candidate.game_url, candidate.site_name, candidate.source, now, now),
+                    (
+                        candidate.keyword,
+                        candidate.canonical_keyword,
+                        candidate.game_url,
+                        candidate.site_name,
+                        candidate.source,
+                        now,
+                        now,
+                    ),
                 )
                 inserted += 1
         self.conn.commit()
@@ -177,9 +238,16 @@ class SQLiteDatabase:
         return list(
             self.conn.execute(
                 """
-                SELECT keyword, game_url, site_name, source, first_seen_at, pushed_at
+                SELECT canonical_keyword AS keyword,
+                       canonical_keyword,
+                       MIN(game_url) AS game_url,
+                       MIN(site_name) AS site_name,
+                       MIN(source) AS source,
+                       MIN(first_seen_at) AS first_seen_at,
+                       MAX(pushed_at) AS pushed_at
                 FROM keywords
-                ORDER BY datetime(last_seen_at) DESC
+                GROUP BY canonical_keyword
+                ORDER BY datetime(MAX(last_seen_at)) DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -195,10 +263,10 @@ class SQLiteDatabase:
         self.conn.execute(
             """
             INSERT INTO trend_results (
-                keyword, provider, score, status, reasons_json, intent_summary, is_noise,
+                keyword, canonical_keyword, provider, score, status, reasons_json, intent_summary, is_noise,
                 graph_values_json, related_top_json, related_rising_json, raw_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             trend_result_values(trend, score),
         )
@@ -251,7 +319,7 @@ class SQLiteDatabase:
         status: str | None = None,
         query: str | None = None,
     ) -> list[sqlite3.Row]:
-        conditions = []
+        conditions = ["tr.id IN (SELECT MAX(id) FROM trend_results GROUP BY canonical_keyword)"]
         params: list[str | int] = []
         if status:
             conditions.append("tr.status = ?")
@@ -265,9 +333,11 @@ class SQLiteDatabase:
             self.conn.execute(
                 f"""
                 SELECT tr.id, tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
-                       tr.intent_summary, tr.is_noise, tr.graph_values_json,
+                       tr.canonical_keyword, tr.intent_summary, tr.is_noise, tr.graph_values_json,
                        tr.related_top_json, tr.related_rising_json, tr.created_at,
-                       k.site_name, k.game_url, k.source
+                       k.site_name, k.game_url, k.source,
+                       (SELECT COUNT(*) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variant_count,
+                       (SELECT GROUP_CONCAT(keyword, '; ') FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variants
                 FROM trend_results tr
                 LEFT JOIN keywords k ON k.keyword = tr.keyword
                 {where}
@@ -389,6 +459,7 @@ class PostgresDatabase:
                 CREATE TABLE IF NOT EXISTS keywords (
                     id BIGSERIAL PRIMARY KEY,
                     keyword TEXT NOT NULL UNIQUE,
+                    canonical_keyword TEXT,
                     game_url TEXT NOT NULL,
                     site_name TEXT NOT NULL,
                     source TEXT NOT NULL,
@@ -403,6 +474,7 @@ class PostgresDatabase:
                 CREATE TABLE IF NOT EXISTS trend_results (
                     id BIGSERIAL PRIMARY KEY,
                     keyword TEXT NOT NULL,
+                    canonical_keyword TEXT,
                     provider TEXT NOT NULL,
                     score INTEGER NOT NULL,
                     status TEXT NOT NULL,
@@ -443,10 +515,24 @@ class PostgresDatabase:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS canonical_keyword TEXT")
+            cur.execute("ALTER TABLE trend_results ADD COLUMN IF NOT EXISTS canonical_keyword TEXT")
+            cur.execute("UPDATE keywords SET canonical_keyword = keyword WHERE canonical_keyword IS NULL OR canonical_keyword = ''")
+            cur.execute("UPDATE trend_results SET canonical_keyword = keyword WHERE canonical_keyword IS NULL OR canonical_keyword = ''")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_keywords_last_seen_at ON keywords (last_seen_at DESC)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_keywords_canonical_keyword ON keywords (canonical_keyword)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_trend_results_created_at ON trend_results (created_at DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_trend_results_status ON trend_results (status)")
         self.conn.commit()
+        self.backfill_canonical_keywords_once()
 
     def upsert_pages(self, pages: Iterable[GamePage]) -> tuple[int, int]:
         inserted = 0
@@ -476,6 +562,38 @@ class PostgresDatabase:
         self.conn.commit()
         return inserted, updated
 
+    def backfill_canonical_keywords_once(self) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT value FROM schema_meta WHERE key = %s", ("canonical_v2",))
+            row = cur.fetchone()
+            if row and row["value"] == "done":
+                return
+            cur.execute("SELECT keyword, site_name FROM keywords")
+            rows = cur.fetchall()
+            for row in rows:
+                canonical = canonical_keyword(row["keyword"], site_name=row["site_name"])
+                cur.execute(
+                    "UPDATE keywords SET canonical_keyword = %s WHERE keyword = %s",
+                    (canonical, row["keyword"]),
+                )
+            cur.execute(
+                """
+                UPDATE trend_results
+                SET canonical_keyword = keywords.canonical_keyword
+                FROM keywords
+                WHERE keywords.keyword = trend_results.keyword
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO schema_meta (key, value)
+                VALUES (%s, %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                ("canonical_v2", "done"),
+            )
+        self.conn.commit()
+
     def upsert_keywords(self, candidates: Iterable[KeywordCandidate]) -> tuple[int, int]:
         inserted = 0
         seen = 0
@@ -486,11 +604,21 @@ class PostgresDatabase:
                 exists = cur.fetchone() is not None
                 cur.execute(
                     """
-                    INSERT INTO keywords (keyword, game_url, site_name, source, first_seen_at, last_seen_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (keyword) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
+                    INSERT INTO keywords (keyword, canonical_keyword, game_url, site_name, source, first_seen_at, last_seen_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (keyword) DO UPDATE SET
+                        canonical_keyword = EXCLUDED.canonical_keyword,
+                        last_seen_at = EXCLUDED.last_seen_at
                     """,
-                    (candidate.keyword, candidate.game_url, candidate.site_name, candidate.source, now, now),
+                    (
+                        candidate.keyword,
+                        candidate.canonical_keyword,
+                        candidate.game_url,
+                        candidate.site_name,
+                        candidate.source,
+                        now,
+                        now,
+                    ),
                 )
                 if exists:
                     seen += 1
@@ -503,9 +631,16 @@ class PostgresDatabase:
         with self.conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT keyword, game_url, site_name, source, first_seen_at, pushed_at
+                SELECT canonical_keyword AS keyword,
+                       canonical_keyword,
+                       MIN(game_url) AS game_url,
+                       MIN(site_name) AS site_name,
+                       MIN(source) AS source,
+                       MIN(first_seen_at) AS first_seen_at,
+                       MAX(pushed_at) AS pushed_at
                 FROM keywords
-                ORDER BY last_seen_at DESC
+                GROUP BY canonical_keyword
+                ORDER BY MAX(last_seen_at) DESC
                 LIMIT %s
                 """,
                 (limit,),
@@ -523,10 +658,10 @@ class PostgresDatabase:
             cur.execute(
                 """
                 INSERT INTO trend_results (
-                    keyword, provider, score, status, reasons_json, intent_summary, is_noise,
+                    keyword, canonical_keyword, provider, score, status, reasons_json, intent_summary, is_noise,
                     graph_values_json, related_top_json, related_rising_json, raw_json, created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 trend_result_values(trend, score),
             )
@@ -583,7 +718,7 @@ class PostgresDatabase:
         status: str | None = None,
         query: str | None = None,
     ):
-        conditions = []
+        conditions = ["tr.id IN (SELECT MAX(id) FROM trend_results GROUP BY canonical_keyword)"]
         params: list[str | int] = []
         if status:
             conditions.append("tr.status = %s")
@@ -597,9 +732,11 @@ class PostgresDatabase:
             cur.execute(
                 f"""
                 SELECT tr.id, tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
-                       tr.intent_summary, tr.is_noise, tr.graph_values_json,
+                       tr.canonical_keyword, tr.intent_summary, tr.is_noise, tr.graph_values_json,
                        tr.related_top_json, tr.related_rising_json, tr.created_at,
-                       k.site_name, k.game_url, k.source
+                       k.site_name, k.game_url, k.source,
+                       (SELECT COUNT(*) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variant_count,
+                       (SELECT STRING_AGG(keyword, '; ' ORDER BY keyword) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variants
                 FROM trend_results tr
                 LEFT JOIN keywords k ON k.keyword = tr.keyword
                 {where}
@@ -615,9 +752,11 @@ class PostgresDatabase:
             cur.execute(
                 """
                 SELECT tr.id, tr.keyword, tr.provider, tr.score, tr.status, tr.reasons_json,
-                       tr.intent_summary, tr.is_noise, tr.graph_values_json,
-                       tr.related_top_json, tr.related_rising_json, tr.raw_json, tr.created_at,
-                       k.site_name, k.game_url, k.source
+                   tr.canonical_keyword, tr.intent_summary, tr.is_noise, tr.graph_values_json,
+                   tr.related_top_json, tr.related_rising_json, tr.raw_json, tr.created_at,
+                   k.site_name, k.game_url, k.source,
+                   (SELECT COUNT(*) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variant_count,
+                   (SELECT STRING_AGG(keyword, '; ' ORDER BY keyword) FROM keywords kv WHERE kv.canonical_keyword = tr.canonical_keyword) AS variants
                 FROM trend_results tr
                 LEFT JOIN keywords k ON k.keyword = tr.keyword
                 WHERE tr.id = %s
@@ -714,6 +853,7 @@ def normalize_postgres_url(url: str) -> str:
 def trend_result_values(trend: TrendResult, score: ScoreResult) -> tuple:
     return (
         trend.keyword,
+        trend.canonical_keyword or canonical_keyword(trend.keyword),
         trend.provider,
         score.score,
         score.status,

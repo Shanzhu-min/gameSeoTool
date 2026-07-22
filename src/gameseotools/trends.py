@@ -22,7 +22,7 @@ class EmptyTrendProvider:
     name = "empty"
 
     def fetch(self, keyword: str) -> TrendResult:
-        return TrendResult(keyword=keyword, provider=self.name)
+        return TrendResult(keyword=keyword, canonical_keyword=keyword, provider=self.name)
 
 
 class DataForSEOTrendProvider:
@@ -115,6 +115,7 @@ def parse_dataforseo_response(keyword: str, raw: dict[str, Any]) -> TrendResult:
 
     return TrendResult(
         keyword=keyword,
+        canonical_keyword=keyword,
         provider="dataforseo",
         graph_values=graph_values,
         related_top=related_top,

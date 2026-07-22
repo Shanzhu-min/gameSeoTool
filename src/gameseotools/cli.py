@@ -12,6 +12,7 @@ from .config import load_config
 from .db import Database
 from .keywords import generate_keywords
 from .notify import configured_notifiers
+from .reporting import compute_trend_metrics
 from .scoring import score_keyword
 from .sitemap import discover_game_pages
 from .trends import DataForSEOTrendProvider, EmptyTrendProvider
@@ -239,17 +240,23 @@ def trend_row_to_record(row) -> dict[str, str | int]:
     related_top = json.loads(row["related_top_json"] or "[]")
     related_rising = json.loads(row["related_rising_json"] or "[]")
     reasons = json.loads(row["reasons_json"] or "[]")
-    peak = max(graph_values) if graph_values else ""
-    recent = graph_values[-7:] if len(graph_values) >= 7 else graph_values
-    recent_avg = round(sum(recent) / len(recent), 2) if recent else ""
+    metrics = compute_trend_metrics(graph_values)
     return {
         "keyword": row["keyword"],
+        "canonical_keyword": row["canonical_keyword"] if "canonical_keyword" in row.keys() else row["keyword"],
         "score": row["score"],
         "status": row["status"],
         "site_name": row["site_name"] or "",
         "game_url": row["game_url"] or "",
-        "peak": peak,
-        "recent_avg": recent_avg,
+        "variant_count": row["variant_count"] if "variant_count" in row.keys() else "",
+        "variants": row["variants"] if "variants" in row.keys() else "",
+        "first": metrics.first if metrics.first is not None else "",
+        "last": metrics.last if metrics.last is not None else "",
+        "peak": metrics.peak if metrics.peak is not None else "",
+        "recent_avg": metrics.recent_avg if metrics.recent_avg is not None else "",
+        "growth_pct": metrics.growth_pct if metrics.growth_pct is not None else "",
+        "validation_status": metrics.validation_status,
+        "recommendation": metrics.recommendation,
         "is_noise": row["is_noise"],
         "related_rising": "; ".join(format_rising(item) for item in related_rising[:8]),
         "related_top": "; ".join(str(item) for item in related_top[:8]),
@@ -268,11 +275,19 @@ def format_rising(item) -> str:
 def write_csv(output: Path, records: list[dict[str, str | int]]) -> None:
     fieldnames = [
         "keyword",
+        "canonical_keyword",
         "score",
         "status",
         "site_name",
+        "variant_count",
+        "variants",
+        "first",
+        "last",
         "peak",
         "recent_avg",
+        "growth_pct",
+        "validation_status",
+        "recommendation",
         "is_noise",
         "related_rising",
         "related_top",

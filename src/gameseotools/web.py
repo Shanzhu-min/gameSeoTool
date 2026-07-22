@@ -19,6 +19,14 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .cli import run_command, trend_row_to_record, write_csv, write_markdown
 from .config import AppConfig, load_config
 from .db import Database
+from .reporting import (
+    domain_candidates,
+    roblox_search_url,
+    search_url,
+    trends_url,
+    wiki_search_url,
+    youtube_search_url,
+)
 from .trends import DataForSEOTrendProvider
 
 
@@ -346,12 +354,16 @@ def render_result_detail(app: WebApp, result_id: int) -> str:
     <section class="detail-head">
       <div>
         <p class="eyebrow">{e(record['site_name'])}</p>
-        <h2>{e(record['keyword'])}</h2>
+        <h2>{e(record['canonical_keyword'])}</h2>
+        <p class="muted">Variants: {e(record['variants'] or 'N/A')}</p>
       </div>
       <span class="badge {e(str(record['status']))}">{e(str(record['status']))}</span>
     </section>
     <section class="metrics">
       <section class="metric"><span>Score</span><strong>{record['score']}</strong></section>
+      <section class="metric"><span>Validation</span><strong>{record['validation_status']}</strong></section>
+      <section class="metric"><span>Recommend</span><strong>{record['recommendation']}</strong></section>
+      <section class="metric"><span>First / Last</span><strong>{record['first']} / {record['last']}</strong></section>
       <section class="metric"><span>Peak</span><strong>{record['peak']}</strong></section>
       <section class="metric"><span>Recent Avg</span><strong>{record['recent_avg']}</strong></section>
     </section>
@@ -362,6 +374,22 @@ def render_result_detail(app: WebApp, result_id: int) -> str:
     <section class="grid-two">
       <div class="panel"><h2>Rising Queries</h2>{list_items([format_related(item) for item in related_rising])}</div>
       <div class="panel"><h2>Top Queries</h2>{list_items([str(item) for item in related_top])}</div>
+    </section>
+    <section class="grid-two">
+      <div class="panel">
+        <h2>Links</h2>
+        {list_items([
+          '<a href="' + e(trends_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Google Trends compare</a>',
+          '<a href="' + e(search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Google Search</a>',
+          '<a href="' + e(wiki_search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Wiki Search</a>',
+          '<a href="' + e(youtube_search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">YouTube Search</a>',
+          '<a href="' + e(roblox_search_url(str(record['canonical_keyword']))) + '" target="_blank" rel="noreferrer">Roblox Search</a>',
+        ], escape_items=False)}
+      </div>
+      <div class="panel">
+        <h2>Domain DNS Check</h2>
+        {list_items([f"{domain}: {status}" for domain, status in domain_candidates(str(record['canonical_keyword']))])}
+      </div>
     </section>
     <section class="panel">
       <h2>Intent</h2>
@@ -467,10 +495,12 @@ def render_results_table(rows) -> str:
         body.append(
             f"""
             <tr>
-              <td><a href="{detail}">{e(str(record['keyword']))}</a><span>{e(str(record['site_name']))}</span></td>
+              <td><a href="{detail}">{e(str(record['canonical_keyword']))}</a><span>{e(str(record['variants'] or record['site_name']))}</span></td>
               <td><span class="badge {e(str(record['status']))}">{e(str(record['status']))}</span></td>
               <td class="num">{record['score']}</td>
+              <td>{e(str(record['validation_status']))}</td>
               <td>{sparkline(graph)}</td>
+              <td class="num">{record['last']}</td>
               <td class="num">{record['peak']}</td>
               <td class="num">{record['recent_avg']}</td>
               <td>{e(str(record['related_rising'])[:120])}</td>
@@ -479,7 +509,7 @@ def render_results_table(rows) -> str:
         )
     return f"""
     <table>
-      <thead><tr><th>Keyword</th><th>Status</th><th>Score</th><th>Trend</th><th>Peak</th><th>Recent Avg</th><th>Rising</th></tr></thead>
+      <thead><tr><th>Keyword Group</th><th>Status</th><th>Score</th><th>Validation</th><th>Trend</th><th>Last</th><th>Peak</th><th>Recent Avg</th><th>Rising</th></tr></thead>
       <tbody>{''.join(body)}</tbody>
     </table>
     """
@@ -539,10 +569,12 @@ def sparkline(values: list[int], large: bool = False) -> str:
     return f'<svg class="spark {"large" if large else ""}" viewBox="0 0 {width} {height}" role="img"><polyline points="{" ".join(points)}"/></svg>'
 
 
-def list_items(items: list[str]) -> str:
+def list_items(items: list[str], escape_items: bool = True) -> str:
     if not items:
         return '<div class="empty">No data</div>'
-    return "<ul>" + "".join(f"<li>{e(item)}</li>" for item in items) + "</ul>"
+    if escape_items:
+        return "<ul>" + "".join(f"<li>{e(item)}</li>" for item in items) + "</ul>"
+    return "<ul>" + "".join(f"<li>{item}</li>" for item in items) + "</ul>"
 
 
 def format_related(item) -> str:

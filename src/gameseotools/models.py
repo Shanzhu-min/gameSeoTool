@@ -17,6 +17,7 @@ class GamePage:
 @dataclass(frozen=True)
 class KeywordCandidate:
     keyword: str
+    canonical_keyword: str
     game_url: str
     site_name: str
     source: str
@@ -25,6 +26,7 @@ class KeywordCandidate:
 @dataclass(frozen=True)
 class TrendResult:
     keyword: str
+    canonical_keyword: str
     provider: str
     graph_values: list[int] = field(default_factory=list)
     related_top: list[str] = field(default_factory=list)
