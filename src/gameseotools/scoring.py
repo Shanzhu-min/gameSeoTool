@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .models import ScoreResult, TrendResult
+from .reporting import compute_trend_metrics
 
 
 def score_keyword(
@@ -17,6 +18,7 @@ def score_keyword(
     reasons = ["Keyword candidate: +15"]
 
     values = trend.graph_values
+    metrics = compute_trend_metrics(values)
     if values:
         recent = values[-7:] if len(values) >= 7 else values
         previous = values[:-7] if len(values) >= 14 else values[: max(1, len(values) // 2)]
@@ -74,6 +76,19 @@ def score_keyword(
     if was_pushed:
         score -= 100
         reasons.append("Already pushed: -100")
+
+    if metrics.validation_status == "no_trend_data":
+        score = min(score, observe_threshold - 1)
+        reasons.append("Validation gate: no trend data cannot be observed or pushed")
+    elif metrics.validation_status == "old_or_declining":
+        score = min(score, observe_threshold)
+        reasons.append("Validation gate: old or declining trend cannot be pushed")
+    elif metrics.validation_status == "volume_without_growth":
+        score = min(score, push_threshold - 1)
+        reasons.append("Validation gate: volume without growth cannot be pushed")
+    elif metrics.validation_status == "weak_signal":
+        score = min(score, observe_threshold)
+        reasons.append("Validation gate: weak signal cannot be pushed")
 
     score = max(0, min(100, score))
 
